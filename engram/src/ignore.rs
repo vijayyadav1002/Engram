@@ -120,22 +120,29 @@ fn is_noise_name(name: &str) -> bool {
 fn matched_by_ignore_files(root: &Path, rel_posix: &str) -> bool {
     let gitignore = root.join(".gitignore");
     let engramignore = root.join(".engramignore");
-    if !gitignore.is_file() && !engramignore.is_file() {
+    let has_gitignore = gitignore.is_file();
+    let has_engramignore = engramignore.is_file();
+    if !has_gitignore && !has_engramignore {
         return false;
     }
 
     let mut builder = GitignoreBuilder::new(root);
-    if gitignore.is_file() {
-        let _ = builder.add(&gitignore);
+    // Existing ignore files must apply. On read/parse failure, fail closed → Ignore
+    // so we never silently treat a broken ignore file as "keep everything".
+    if has_gitignore {
+        if builder.add(&gitignore).is_some() {
+            return true;
+        }
     }
-    if engramignore.is_file() {
-        let _ = builder.add(&engramignore);
+    if has_engramignore {
+        if builder.add(&engramignore).is_some() {
+            return true;
+        }
     }
     let Ok(gi) = builder.build() else {
-        return false;
+        return true;
     };
 
-    // Treat as a file path; directory-only patterns still apply via gitignore matching.
     gi.matched_path_or_any_parents(rel_posix, false).is_ignore()
 }
 
@@ -143,7 +150,16 @@ fn matched_by_ignore_files(root: &Path, rel_posix: &str) -> bool {
 mod tests {
     use super::*;
     use crate::secret::is_secret_content;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn tempfile_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("engram-ignore-{}-{}", std::process::id(), n));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn skips_node_modules_and_env() {
@@ -181,6 +197,30 @@ mod tests {
         assert!(matches!(
             should_skip(Path::new("/p"), "oops.txt", Some(pem)),
             SkipKind::SecretContent
+        ));
+    }
+
+    #[test]
+    fn honors_gitignore_and_engramignore() {
+        let root = tempfile_dir();
+        std::fs::write(root.join(".gitignore"), "ignored.txt\ntmp/\n").unwrap();
+        std::fs::write(root.join(".engramignore"), "scratch.rs\n").unwrap();
+
+        assert!(matches!(
+            should_skip(&root, "ignored.txt", None),
+            SkipKind::Ignore
+        ));
+        assert!(matches!(
+            should_skip(&root, "tmp/foo.rs", None),
+            SkipKind::Ignore
+        ));
+        assert!(matches!(
+            should_skip(&root, "scratch.rs", None),
+            SkipKind::Ignore
+        ));
+        assert!(matches!(
+            should_skip(&root, "keep.rs", None),
+            SkipKind::Keep
         ));
     }
 }
