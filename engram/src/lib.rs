@@ -1,4 +1,8 @@
 pub mod error;
+pub mod hash;
+pub mod ignore;
+pub mod root;
+pub mod secret;
 pub mod store;
 pub mod types;
 pub use error::Error;
