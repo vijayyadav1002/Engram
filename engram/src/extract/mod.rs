@@ -1,3 +1,5 @@
+pub mod css;
+pub mod markdown;
 pub mod python;
 pub mod ts;
 
@@ -17,6 +19,12 @@ pub fn extract_path(rel_posix: &str, source: &str) -> Extraction {
     }
     if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") {
         return ts::extract(source, ts::TsLang::Javascript);
+    }
+    if lower.ends_with(".md") || lower.ends_with(".mdx") {
+        return markdown::extract(source);
+    }
+    if lower.ends_with(".css") || lower.ends_with(".scss") {
+        return css::extract(source);
     }
     Extraction {
         status: ParseStatus::File,
