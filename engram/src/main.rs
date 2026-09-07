@@ -3,7 +3,7 @@ use engram::compile::{get_context, search_code, search_symbols, DEFAULT_BUDGET};
 use engram::doctor::{run_doctor, run_status};
 use engram::error::Error;
 use engram::index::{index_repo, IndexStats};
-use engram::init::run_init;
+use engram::init::{run_init, write_harness, write_skill};
 use engram::render::render_digest;
 use engram::root::{env_root, find_repo_root};
 use std::path::PathBuf;
@@ -21,7 +21,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Create `.engram/`, empty DB, and ignore files (does not index)
-    Init,
+    Init {
+        /// Write project MCP snippet: grok|copilot|claude|cursor|all
+        #[arg(long)]
+        harness: Option<String>,
+        /// Write get_context skill under `.grok/skills/engram/`
+        #[arg(long)]
+        skill: bool,
+        /// Create `AGENTS.md` when writing skill (append if it already exists)
+        #[arg(long)]
+        write_agents: bool,
+    },
     /// Incremental index (`--force` rebuilds)
     Index {
         #[arg(long)]
@@ -64,9 +74,20 @@ fn main() {
 
 fn dispatch(cli: Cli) -> Result<(), Error> {
     match cli.command {
-        Commands::Init => {
+        Commands::Init {
+            harness,
+            skill,
+            write_agents,
+        } => {
             let cwd = current_dir()?;
             let root = run_init(&cwd)?;
+            if let Some(ref id) = harness {
+                write_harness(&root, id)?;
+            }
+            if skill {
+                let also_claude = matches!(harness.as_deref(), Some("claude") | Some("all"));
+                write_skill(&root, also_claude, write_agents)?;
+            }
             println!("initialized {}", root.display());
             Ok(())
         }
