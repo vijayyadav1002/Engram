@@ -1,4 +1,137 @@
+use clap::{Parser, Subcommand};
+use engram::compile::{get_context, search_code, search_symbols, DEFAULT_BUDGET};
+use engram::doctor::{run_doctor, run_status};
+use engram::error::Error;
+use engram::index::{index_repo, IndexStats};
+use engram::init::run_init;
+use engram::render::render_digest;
+use engram::root::{env_root, find_repo_root};
+use std::path::PathBuf;
+use std::process;
+
+const SEARCH_LIMIT: usize = 20;
+
+#[derive(Parser)]
+#[command(name = "engram", version, about = "Local extractive code intelligence")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create `.engram/`, empty DB, and ignore files (does not index)
+    Init,
+    /// Incremental index (`--force` rebuilds)
+    Index {
+        #[arg(long)]
+        force: bool,
+    },
+    /// DB path, schema, counts, last index, stale sample
+    Status,
+    /// Compile an extractive context package
+    GetContext {
+        query: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = DEFAULT_BUDGET)]
+        budget: u32,
+    },
+    /// Debug: symbol lookup
+    SearchSymbols { name: String },
+    /// Debug: FTS lookup
+    SearchCode { query: String },
+    /// MCP stdio server
+    Mcp,
+    /// Check binary, grammars, DB, ignore files, harness config
+    Doctor,
+}
+
 fn main() {
-    eprintln!("not implemented");
-    std::process::exit(1);
+    match Cli::try_parse() {
+        Ok(cli) => {
+            if let Err(err) = dispatch(cli) {
+                eprintln!("{err}");
+                process::exit(err.exit_code());
+            }
+        }
+        Err(e) => {
+            let _ = e.print();
+            process::exit(if e.use_stderr() { 1 } else { 0 });
+        }
+    }
+}
+
+fn dispatch(cli: Cli) -> Result<(), Error> {
+    match cli.command {
+        Commands::Init => {
+            let cwd = current_dir()?;
+            let root = run_init(&cwd)?;
+            println!("initialized {}", root.display());
+            Ok(())
+        }
+        Commands::Index { force } => {
+            let stats = index_repo(&require_root()?, force)?;
+            print_index_stats(&stats);
+            Ok(())
+        }
+        Commands::Status => {
+            print!("{}", run_status(&require_root()?)?);
+            Ok(())
+        }
+        Commands::GetContext {
+            query,
+            json,
+            budget,
+        } => {
+            let pkg = get_context(&require_root()?, &query, budget)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&pkg).expect("json"));
+            } else {
+                print!("{}", render_digest(&pkg));
+            }
+            Ok(())
+        }
+        Commands::SearchSymbols { name } => {
+            for h in search_symbols(&require_root()?, &name, SEARCH_LIMIT)? {
+                println!(
+                    "{}:{}-{} {} {}",
+                    h.path,
+                    h.start_line,
+                    h.end_line,
+                    h.kind.as_str(),
+                    h.name
+                );
+            }
+            Ok(())
+        }
+        Commands::SearchCode { query } => {
+            for h in search_code(&require_root()?, &query, SEARCH_LIMIT)? {
+                println!("{}\t{}", h.path, h.rank);
+            }
+            Ok(())
+        }
+        Commands::Mcp => engram::mcp::run(),
+        Commands::Doctor => {
+            print!("{}", run_doctor(&require_root()?)?);
+            Ok(())
+        }
+    }
+}
+
+fn current_dir() -> Result<PathBuf, Error> {
+    std::env::current_dir().map_err(Error::from)
+}
+
+fn require_root() -> Result<PathBuf, Error> {
+    find_repo_root(&current_dir()?, env_root().as_deref())
+}
+
+fn print_index_stats(stats: &IndexStats) {
+    let skipped = stats.skipped_secret + stats.skipped_large + stats.skipped_ignore;
+    println!("files: {}", stats.files);
+    println!("symbols: {}", stats.symbols);
+    println!("edges: {}", stats.edges);
+    println!("skipped: {}", skipped);
+    println!("errors: {}", stats.errors);
 }

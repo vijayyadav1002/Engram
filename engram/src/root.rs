@@ -1,6 +1,13 @@
 use crate::error::Error;
 use std::path::{Path, PathBuf};
 
+/// `ENGRAM_ROOT` if set and non-empty.
+pub fn env_root() -> Option<PathBuf> {
+    std::env::var_os("ENGRAM_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Resolve the Engram repo root.
 ///
 /// If `env_root` is set and is a directory, that path wins (canonicalized when possible).
