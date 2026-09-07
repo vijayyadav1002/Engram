@@ -219,28 +219,38 @@ impl Store {
                 "SELECT id, path, language, hash, size, mtime, parse_status
                  FROM files WHERE path = ?1",
                 params![path],
-                |r| {
-                    let status_s: String = r.get(6)?;
-                    let parse_status = ParseStatus::from_str(&status_s).ok_or_else(|| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Text,
-                            format!("unknown parse_status: {status_s}").into(),
-                        )
-                    })?;
-                    Ok(FileRow {
-                        id: r.get(0)?,
-                        path: r.get(1)?,
-                        language: r.get(2)?,
-                        hash: r.get(3)?,
-                        size: r.get(4)?,
-                        mtime: r.get(5)?,
-                        parse_status,
-                    })
-                },
+                map_file_row,
             )
             .optional()
             .map_err(map_db)
+    }
+
+    pub fn list_files(&self) -> Result<Vec<FileRow>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, path, language, hash, size, mtime, parse_status
+                 FROM files",
+            )
+            .map_err(map_db)?;
+        let rows = stmt.query_map([], map_file_row).map_err(map_db)?;
+        collect_hits(rows)
+    }
+
+    pub fn counts(&self) -> Result<(i64, i64, i64), Error> {
+        let file_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .map_err(map_db)?;
+        let symbol_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .map_err(map_db)?;
+        let edge_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+            .map_err(map_db)?;
+        Ok((file_count, symbol_count, edge_count))
     }
 
     pub fn replace_file_payload(
@@ -290,10 +300,7 @@ impl Store {
         Ok(out)
     }
 
-    pub fn insert_edges(
-        &self,
-        triples: &[(i64, i64, EdgeKind, Confidence)],
-    ) -> Result<(), Error> {
+    pub fn insert_edges(&self, triples: &[(i64, i64, EdgeKind, Confidence)]) -> Result<(), Error> {
         let tx = self.conn.unchecked_transaction().map_err(map_db)?;
         for (src, dst, kind, confidence) in triples {
             tx.execute(
@@ -307,11 +314,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn lookup_symbols_exact(
-        &self,
-        name: &str,
-        limit: usize,
-    ) -> Result<Vec<SymbolHit>, Error> {
+    pub fn lookup_symbols_exact(&self, name: &str, limit: usize) -> Result<Vec<SymbolHit>, Error> {
         let mut stmt = self
             .conn
             .prepare(
@@ -374,9 +377,7 @@ impl Store {
                     .prepare("SELECT path FROM file_fts WHERE file_fts MATCH ?1 LIMIT ?2")
                     .map_err(map_db)?;
                 let rows = stmt
-                    .query_map(params![query, limit as i64], |r| {
-                        Ok(r.get::<_, String>(0)?)
-                    })
+                    .query_map(params![query, limit as i64], |r| Ok(r.get::<_, String>(0)?))
                     .map_err(map_db)?;
                 let paths: Vec<String> = collect_hits(rows)?;
                 let n = paths.len();
@@ -476,6 +477,26 @@ impl Store {
     }
 }
 
+fn map_file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
+    let status_s: String = r.get(6)?;
+    let parse_status = ParseStatus::from_str(&status_s).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            6,
+            rusqlite::types::Type::Text,
+            format!("unknown parse_status: {status_s}").into(),
+        )
+    })?;
+    Ok(FileRow {
+        id: r.get(0)?,
+        path: r.get(1)?,
+        language: r.get(2)?,
+        hash: r.get(3)?,
+        size: r.get(4)?,
+        mtime: r.get(5)?,
+        parse_status,
+    })
+}
+
 fn map_symbol_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolHit> {
     let kind_s: String = r.get(4)?;
     let kind = SymbolKind::from_str(&kind_s).ok_or_else(|| {
@@ -544,11 +565,8 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!(
-            "engram-test-{}-{}.sqlite",
-            std::process::id(),
-            n
-        ));
+        let p =
+            std::env::temp_dir().join(format!("engram-test-{}-{}.sqlite", std::process::id(), n));
         let _ = std::fs::remove_file(&p);
         p
     }
@@ -589,9 +607,16 @@ mod tests {
             .unwrap();
         assert_eq!(syms[0].1, "foo");
 
+        let listed = store.list_files().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "a.py");
+        assert_eq!(store.counts().unwrap(), (1, 1, 0));
+
         store.delete_file_by_path("a.py").unwrap();
         assert!(store.get_file("a.py").unwrap().is_none());
         assert!(store.lookup_symbols_exact("foo", 10).unwrap().is_empty());
+        assert!(store.list_files().unwrap().is_empty());
+        assert_eq!(store.counts().unwrap(), (0, 0, 0));
         let _ = std::fs::remove_file(&path);
     }
 

@@ -2,6 +2,7 @@ pub mod error;
 pub mod extract;
 pub mod hash;
 pub mod ignore;
+pub mod index;
 pub mod root;
 pub mod secret;
 pub mod store;
