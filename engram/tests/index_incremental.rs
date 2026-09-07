@@ -1,5 +1,6 @@
 use engram::index::index_repo;
 use engram::store::Store;
+use engram::types::{Confidence, EdgeKind};
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,6 +18,31 @@ fn setup() -> PathBuf {
     fs::write(root.join("README.md"), "## WebSockets\n").unwrap();
     Store::create(&root.join(".engram/index.sqlite"), root.to_str().unwrap()).unwrap();
     root
+}
+
+fn setup_auth() -> PathBuf {
+    let root = setup();
+    fs::write(
+        root.join("src/auth/LoginBanner.tsx"),
+        "import { createSession } from \"./session\"; export function LoginBanner() { return createSession(); }\n",
+    )
+    .unwrap();
+    root
+}
+
+fn banner_links_create_session(db: &Store) -> bool {
+    db.lookup_symbols_exact("createSession", 10)
+        .unwrap()
+        .into_iter()
+        .chain(db.lookup_symbols_exact("LoginBanner", 10).unwrap())
+        .flat_map(|h| db.neighbors(h.id, 40).unwrap())
+        .any(|n| {
+            let to_cs = n.dst_name == "createSession" || n.src_name == "createSession";
+            let from_banner = n.src_name == "LoginBanner"
+                || n.src_path.contains("LoginBanner")
+                || n.dst_path.contains("LoginBanner");
+            to_cs && from_banner && matches!(n.kind, EdgeKind::Call | EdgeKind::Import)
+        })
 }
 
 fn unique_name() -> String {
@@ -93,4 +119,67 @@ fn large_file_skipped() {
     assert!(stats.skipped_large >= 1);
     let db = Store::open_read(&root.join(".engram/index.sqlite")).unwrap();
     assert!(db.get_file("blob.txt").unwrap().is_none());
+}
+
+#[test]
+fn indexes_call_or_import_to_create_session() {
+    let root = setup_auth();
+    index_repo(&root, false).unwrap();
+    let db = Store::open_read(&root.join(".engram/index.sqlite")).unwrap();
+    assert!(
+        banner_links_create_session(&db),
+        "expected Call or Import edge involving createSession"
+    );
+    let call = db
+        .lookup_symbols_exact("LoginBanner", 10)
+        .unwrap()
+        .into_iter()
+        .flat_map(|h| db.neighbors(h.id, 40).unwrap())
+        .find(|n| n.kind == EdgeKind::Call && n.dst_name == "createSession");
+    assert!(
+        call.is_some(),
+        "imported createSession() call should resolve to a Call edge"
+    );
+    assert_eq!(call.unwrap().confidence, Confidence::High);
+}
+
+#[test]
+fn reindex_session_keeps_banner_edge() {
+    let root = setup_auth();
+    index_repo(&root, false).unwrap();
+    fs::write(
+        root.join("src/auth/session.ts"),
+        "export function createSession() { return 2 }\n",
+    )
+    .unwrap();
+    let stats = index_repo(&root, false).unwrap();
+    assert!(stats.unchanged >= 1);
+    let db = Store::open_read(&root.join(".engram/index.sqlite")).unwrap();
+    assert!(
+        banner_links_create_session(&db),
+        "unchanged LoginBanner must keep its edge into rewritten createSession"
+    );
+}
+
+#[test]
+fn name_only_call_is_low() {
+    let root = setup();
+    fs::write(
+        root.join("src/auth/other.ts"),
+        "export function other() { return createSession(); }\n",
+    )
+    .unwrap();
+    index_repo(&root, false).unwrap();
+    let db = Store::open_read(&root.join(".engram/index.sqlite")).unwrap();
+    let call = db
+        .lookup_symbols_exact("other", 10)
+        .unwrap()
+        .into_iter()
+        .flat_map(|h| db.neighbors(h.id, 40).unwrap())
+        .find(|n| n.kind == EdgeKind::Call && n.dst_name == "createSession");
+    assert!(
+        call.is_some(),
+        "name-only call should resolve if dest exists"
+    );
+    assert_eq!(call.unwrap().confidence, Confidence::Low);
 }

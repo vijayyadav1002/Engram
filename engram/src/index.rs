@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::extract::extract_path;
 use crate::hash::blake3_hex;
 use crate::ignore::{should_skip, SkipKind, MAX_FILE_BYTES};
-use crate::store::{FileRow, Store};
+use crate::store::{FileRow, IncomingEdge, Store};
 use crate::types::{Confidence, EdgeKind, ExtractedEdge, Extraction, ParseStatus, SymbolKind};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -96,9 +96,11 @@ pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
         }
     }
 
+    let rewritten: HashSet<String> = work_items.iter().map(|i| i.rel.clone()).collect();
     let mut file_syms: HashMap<String, HashMap<String, i64>> = HashMap::new();
+    let mut pending_incoming: Vec<(String, Vec<IncomingEdge>)> = Vec::new();
     for item in &work_items {
-        store.delete_file_by_path(&item.rel)?;
+        let incoming = store.incoming_edges(&item.rel)?;
         let file_id = store.upsert_file(&FileRow {
             id: 0,
             path: item.rel.clone(),
@@ -119,6 +121,7 @@ pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
             map.entry(name).or_insert(id);
         }
         file_syms.insert(item.rel.clone(), map);
+        pending_incoming.push((item.rel.clone(), incoming));
     }
 
     let mut triples = Vec::new();
@@ -127,10 +130,33 @@ pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
         let Some(local) = file_syms.get(&item.rel) else {
             continue;
         };
+        let import_names: HashSet<String> = item
+            .extraction
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Import)
+            .map(|e| e.dst_name.clone())
+            .collect();
         for edge in &item.extraction.edges {
-            if let Some(triple) = resolve_edge(edge, &item.rel, local, &store, &import_index)? {
+            if let Some(triple) =
+                resolve_edge(edge, &item.rel, local, &import_names, &store, &import_index)?
+            {
                 triples.push(triple);
             }
+        }
+    }
+    for (dst_path, incoming) in pending_incoming {
+        let Some(local) = file_syms.get(&dst_path) else {
+            continue;
+        };
+        for inc in incoming {
+            if rewritten.contains(&inc.src_path) {
+                continue;
+            }
+            let Some(&dst_id) = local.get(&inc.dst_name) else {
+                continue;
+            };
+            triples.push((inc.src_id, dst_id, inc.kind, inc.confidence));
         }
     }
     if !triples.is_empty() {
@@ -341,6 +367,7 @@ fn resolve_edge(
     edge: &ExtractedEdge,
     file_path: &str,
     local: &HashMap<String, i64>,
+    import_names: &HashSet<String>,
     store: &Store,
     imports: &ImportIndex,
 ) -> Result<Option<(i64, i64, EdgeKind, Confidence)>, Error> {
@@ -358,7 +385,16 @@ fn resolve_edge(
             if let Some(dst) = local.get(&edge.dst_name).copied() {
                 return Ok(Some((src, dst, EdgeKind::Call, Confidence::High)));
             }
-            Ok(None)
+            let hits = store.lookup_symbols_exact(&edge.dst_name, 8)?;
+            let Some(hit) = hits.into_iter().next() else {
+                return Ok(None);
+            };
+            let conf = if import_names.contains(&edge.dst_name) {
+                Confidence::High
+            } else {
+                Confidence::Low
+            };
+            Ok(Some((src, hit.id, EdgeKind::Call, conf)))
         }
         EdgeKind::Import => {
             if let Some(dst) = imports.module_for_spec(file_path, &edge.dst_name) {

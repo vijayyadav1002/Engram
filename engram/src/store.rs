@@ -105,6 +105,15 @@ pub struct NeighborHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncomingEdge {
+    pub src_id: i64,
+    pub src_path: String,
+    pub dst_name: String,
+    pub kind: EdgeKind,
+    pub confidence: Confidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meta {
     pub schema_version: i64,
     pub indexed_at: Option<String>,
@@ -393,6 +402,36 @@ impl Store {
         }
     }
 
+    /// Edges into `path` from other files, keyed by destination symbol name.
+    pub fn incoming_edges(&self, path: &str) -> Result<Vec<IncomingEdge>, Error> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT e.src_symbol_id, fsrc.path, dst.name, e.kind, e.confidence
+                 FROM edges e
+                 JOIN symbols dst ON dst.id = e.dst_symbol_id
+                 JOIN files fdst ON fdst.id = dst.file_id
+                 JOIN symbols src ON src.id = e.src_symbol_id
+                 JOIN files fsrc ON fsrc.id = src.file_id
+                 WHERE fdst.path = ?1 AND fsrc.path != ?1",
+            )
+            .map_err(map_db)?;
+        let rows = stmt
+            .query_map(params![path], |r| {
+                let kind_s: String = r.get(3)?;
+                let conf_s: String = r.get(4)?;
+                Ok(IncomingEdge {
+                    src_id: r.get(0)?,
+                    src_path: r.get(1)?,
+                    dst_name: r.get(2)?,
+                    kind: parse_edge_kind(&kind_s, 3)?,
+                    confidence: parse_confidence(&conf_s, 4)?,
+                })
+            })
+            .map_err(map_db)?;
+        collect_hits(rows)
+    }
+
     pub fn neighbors(&self, symbol_id: i64, cap: usize) -> Result<Vec<NeighborHit>, Error> {
         let mut stmt = self
             .conn
@@ -412,20 +451,6 @@ impl Store {
             .query_map(params![symbol_id, cap as i64], |r| {
                 let kind_s: String = r.get(6)?;
                 let conf_s: String = r.get(7)?;
-                let kind = EdgeKind::from_str(&kind_s).ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        6,
-                        rusqlite::types::Type::Text,
-                        format!("unknown edge kind: {kind_s}").into(),
-                    )
-                })?;
-                let confidence = Confidence::from_str(&conf_s).ok_or_else(|| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        7,
-                        rusqlite::types::Type::Text,
-                        format!("unknown confidence: {conf_s}").into(),
-                    )
-                })?;
                 Ok(NeighborHit {
                     src_id: r.get(0)?,
                     dst_id: r.get(1)?,
@@ -433,8 +458,8 @@ impl Store {
                     dst_name: r.get(3)?,
                     src_path: r.get(4)?,
                     dst_path: r.get(5)?,
-                    kind,
-                    confidence,
+                    kind: parse_edge_kind(&kind_s, 6)?,
+                    confidence: parse_confidence(&conf_s, 7)?,
                 })
             })
             .map_err(map_db)?;
@@ -475,6 +500,26 @@ impl Store {
             )
             .map_err(map_db)
     }
+}
+
+fn parse_edge_kind(kind_s: &str, idx: usize) -> rusqlite::Result<EdgeKind> {
+    EdgeKind::from_str(kind_s).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            rusqlite::types::Type::Text,
+            format!("unknown edge kind: {kind_s}").into(),
+        )
+    })
+}
+
+fn parse_confidence(conf_s: &str, idx: usize) -> rusqlite::Result<Confidence> {
+    Confidence::from_str(conf_s).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            rusqlite::types::Type::Text,
+            format!("unknown confidence: {conf_s}").into(),
+        )
+    })
 }
 
 fn map_file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
@@ -640,6 +685,75 @@ mod tests {
             .unwrap();
         let hits = store.fts_search("WebSockets", 10).unwrap();
         assert_eq!(hits[0].path, "README.md");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn incoming_edges_from_other_files() {
+        let path = tmp_db();
+        let store = Store::create(&path, "/tmp/proj").unwrap();
+        let a = store
+            .upsert_file(&FileRow {
+                id: 0,
+                path: "a.ts".into(),
+                language: Some("typescript".into()),
+                hash: "a".into(),
+                size: 1,
+                mtime: 1,
+                parse_status: ParseStatus::Graph,
+            })
+            .unwrap();
+        let b = store
+            .upsert_file(&FileRow {
+                id: 0,
+                path: "b.ts".into(),
+                language: Some("typescript".into()),
+                hash: "b".into(),
+                size: 1,
+                mtime: 1,
+                parse_status: ParseStatus::Graph,
+            })
+            .unwrap();
+        let a_syms = store
+            .replace_file_payload(
+                a,
+                &[ExtractedSymbol {
+                    name: "src".into(),
+                    kind: SymbolKind::Function,
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 1,
+                    signature: None,
+                }],
+                None,
+                "a.ts",
+            )
+            .unwrap();
+        let b_syms = store
+            .replace_file_payload(
+                b,
+                &[ExtractedSymbol {
+                    name: "dst".into(),
+                    kind: SymbolKind::Function,
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 1,
+                    signature: None,
+                }],
+                None,
+                "b.ts",
+            )
+            .unwrap();
+        store
+            .insert_edges(&[(a_syms[0].0, b_syms[0].0, EdgeKind::Call, Confidence::High)])
+            .unwrap();
+        let incoming = store.incoming_edges("b.ts").unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].src_path, "a.ts");
+        assert_eq!(incoming[0].dst_name, "dst");
+        assert!(store.incoming_edges("a.ts").unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }
