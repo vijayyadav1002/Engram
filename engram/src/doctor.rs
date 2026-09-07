@@ -13,8 +13,10 @@ pub fn run_doctor(root: &Path) -> Result<String, Error> {
     lines.push(format!("grammars: {}", grammar_status()));
 
     let db = root.join(".engram/index.sqlite");
-    let store = Store::open_read(&db)?;
-    let meta = store.meta()?;
+    let store = open_doctor_db(&db)?;
+    let meta = store
+        .meta()
+        .map_err(|_| Error::Db(format!("unreadable {}", db.display())))?;
     lines.push(format!("db: {}", db.display()));
     lines.push(format!("schema_version: {}", meta.schema_version));
     lines.push(format!(
@@ -93,7 +95,21 @@ stale_sample: {}/{}\n",
     ))
 }
 
+fn open_doctor_db(db: &Path) -> Result<Store, Error> {
+    if !db.is_file() {
+        return Err(Error::Db(format!("unreadable {}", db.display())));
+    }
+    match Store::open_read(db) {
+        Ok(store) => Ok(store),
+        Err(Error::NotInitialized) => Err(Error::Db(format!("unreadable {}", db.display()))),
+        Err(e) => Err(e),
+    }
+}
+
 fn present_line(label: &str, present: bool) -> String {
+    if !present && label.starts_with("harness") {
+        eprintln!("warn: {label} absent");
+    }
     format!("{label}: {}", if present { "present" } else { "absent" })
 }
 
