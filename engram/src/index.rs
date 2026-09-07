@@ -130,7 +130,7 @@ pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
         let Some(local) = file_syms.get(&item.rel) else {
             continue;
         };
-        let import_names: HashSet<String> = item
+        let import_dsts: HashSet<String> = item
             .extraction
             .edges
             .iter()
@@ -139,7 +139,7 @@ pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
             .collect();
         for edge in &item.extraction.edges {
             if let Some(triple) =
-                resolve_edge(edge, &item.rel, local, &import_names, &store, &import_index)?
+                resolve_edge(edge, &item.rel, local, &import_dsts, &store, &import_index)?
             {
                 triples.push(triple);
             }
@@ -320,6 +320,7 @@ struct ImportIndex {
     by_path: HashMap<String, i64>,
     by_no_ext: HashMap<String, i64>,
     by_stem: HashMap<String, i64>,
+    path_by_id: HashMap<i64, String>,
 }
 
 impl ImportIndex {
@@ -328,6 +329,7 @@ impl ImportIndex {
         let mut by_path = HashMap::new();
         let mut by_no_ext = HashMap::new();
         let mut by_stem = HashMap::new();
+        let mut path_by_id = HashMap::new();
         for m in modules {
             if m.kind != SymbolKind::Module {
                 continue;
@@ -336,12 +338,14 @@ impl ImportIndex {
                 by_stem.insert(stem.to_string(), m.id);
             }
             by_no_ext.insert(strip_ext(&m.path), m.id);
+            path_by_id.insert(m.id, m.path.clone());
             by_path.insert(m.path, m.id);
         }
         Ok(Self {
             by_path,
             by_no_ext,
             by_stem,
+            path_by_id,
         })
     }
 
@@ -361,13 +365,17 @@ impl ImportIndex {
             .or_else(|| self.by_no_ext.get(pathish))
             .copied()
     }
+
+    fn path_for(&self, module_id: i64) -> Option<&str> {
+        self.path_by_id.get(&module_id).map(String::as_str)
+    }
 }
 
 fn resolve_edge(
     edge: &ExtractedEdge,
     file_path: &str,
     local: &HashMap<String, i64>,
-    import_names: &HashSet<String>,
+    import_dsts: &HashSet<String>,
     store: &Store,
     imports: &ImportIndex,
 ) -> Result<Option<(i64, i64, EdgeKind, Confidence)>, Error> {
@@ -385,16 +393,16 @@ fn resolve_edge(
             if let Some(dst) = local.get(&edge.dst_name).copied() {
                 return Ok(Some((src, dst, EdgeKind::Call, Confidence::High)));
             }
+            if let Some(dst) =
+                resolve_call_via_imports(file_path, &edge.dst_name, import_dsts, store, imports)?
+            {
+                return Ok(Some((src, dst, EdgeKind::Call, Confidence::High)));
+            }
             let hits = store.lookup_symbols_exact(&edge.dst_name, 8)?;
             let Some(hit) = hits.into_iter().next() else {
                 return Ok(None);
             };
-            let conf = if import_names.contains(&edge.dst_name) {
-                Confidence::High
-            } else {
-                Confidence::Low
-            };
-            Ok(Some((src, hit.id, EdgeKind::Call, conf)))
+            Ok(Some((src, hit.id, EdgeKind::Call, Confidence::Low)))
         }
         EdgeKind::Import => {
             if let Some(dst) = imports.module_for_spec(file_path, &edge.dst_name) {
@@ -410,6 +418,44 @@ fn resolve_edge(
             Ok(None)
         }
     }
+}
+
+fn resolve_call_via_imports(
+    file_path: &str,
+    name: &str,
+    import_dsts: &HashSet<String>,
+    store: &Store,
+    imports: &ImportIndex,
+) -> Result<Option<i64>, Error> {
+    let mut specs: Vec<&str> = import_dsts.iter().map(String::as_str).collect();
+    specs.sort_by_key(|s| (!is_module_spec(s), *s));
+    for spec in specs {
+        if spec == name {
+            continue;
+        }
+        let Some(module_id) = imports.module_for_spec(file_path, spec) else {
+            continue;
+        };
+        let Some(mod_path) = imports.path_for(module_id) else {
+            continue;
+        };
+        if let Some(id) = symbol_id_in_path(store, name, mod_path)? {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+fn is_module_spec(spec: &str) -> bool {
+    spec.starts_with('.') || spec.starts_with('/') || spec.contains('/')
+}
+
+fn symbol_id_in_path(store: &Store, name: &str, path: &str) -> Result<Option<i64>, Error> {
+    Ok(store
+        .lookup_symbols_exact(name, 10_000)?
+        .into_iter()
+        .find(|h| h.path == path)
+        .map(|h| h.id))
 }
 
 fn resolve_relative(from_file: &str, spec: &str) -> Option<String> {

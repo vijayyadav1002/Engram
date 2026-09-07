@@ -183,3 +183,45 @@ fn name_only_call_is_low() {
     );
     assert_eq!(call.unwrap().confidence, Confidence::Low);
 }
+
+#[test]
+fn import_resolved_call_high_uses_specifier_not_name_global() {
+    let root = std::env::temp_dir().join(format!("engram-idx-{}", unique_name()));
+    fs::create_dir_all(root.join("src/other")).unwrap();
+    fs::create_dir_all(root.join("src/auth")).unwrap();
+    fs::create_dir_all(root.join(".engram")).unwrap();
+    Store::create(&root.join(".engram/index.sqlite"), root.to_str().unwrap()).unwrap();
+    // Index the decoy first so a name-global `.next()` prefers it by rowid.
+    fs::write(
+        root.join("src/other/session.ts"),
+        "export function createSession() { return 0 }\n",
+    )
+    .unwrap();
+    index_repo(&root, false).unwrap();
+
+    fs::write(
+        root.join("src/auth/session.ts"),
+        "export function createSession() { return 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/auth/LoginBanner.tsx"),
+        "import { createSession } from \"./session\"; export function LoginBanner() { return createSession(); }\n",
+    )
+    .unwrap();
+    index_repo(&root, false).unwrap();
+
+    let db = Store::open_read(&root.join(".engram/index.sqlite")).unwrap();
+    let hits = db.lookup_symbols_exact("createSession", 10).unwrap();
+    assert_eq!(hits.len(), 2, "both files must export createSession");
+    let call = db
+        .lookup_symbols_exact("LoginBanner", 10)
+        .unwrap()
+        .into_iter()
+        .flat_map(|h| db.neighbors(h.id, 40).unwrap())
+        .find(|n| n.kind == EdgeKind::Call && n.dst_name == "createSession")
+        .expect("imported createSession() call should resolve to a Call edge");
+    assert_eq!(call.confidence, Confidence::High);
+    assert_eq!(call.dst_path, "src/auth/session.ts");
+    let _ = fs::remove_dir_all(&root);
+}
