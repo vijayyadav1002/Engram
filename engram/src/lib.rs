@@ -1,4 +1,5 @@
 pub mod error;
+pub mod extract;
 pub mod hash;
 pub mod ignore;
 pub mod root;
