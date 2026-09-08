@@ -220,6 +220,7 @@ pub fn get_context(root: &Path, query: &str, budget_tokens: u32) -> Result<Conte
             stale_omitted,
             stale_index: false,
             truncated: false,
+            palace: None,
         },
     };
     pkg.edges = package_edges(&pkg.items, &neighbor_edges);

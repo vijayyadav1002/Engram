@@ -66,6 +66,7 @@ mod tests {
                 stale_omitted: 0,
                 stale_index: false,
                 truncated: false,
+                palace: None,
             },
         }
     }
