@@ -1,3 +1,10 @@
+use std::io::{ErrorKind, Read};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
 pub const PALACE_MAX_HITS: usize = 3;
 pub const PALACE_ITEM_MAX_CHARS: usize = 1200;
 pub const PALACE_MIN_REMAINING: u32 = 200;
@@ -124,9 +131,139 @@ fn is_rule_line(trimmed: &str) -> bool {
     trimmed.starts_with('─') || trimmed.starts_with("──")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PalaceError {
+    NotInstalled,
+    Timeout,
+    Unparseable,
+    Io(String),
+}
+
+pub trait PalaceSearch: Send + Sync {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<PalaceDrawer>, PalaceError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CliPalaceSearch {
+    pub bin: PathBuf,
+    pub cwd: PathBuf,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FakePalaceSearch {
+    pub drawers: Vec<PalaceDrawer>,
+    pub error: Option<PalaceError>,
+}
+
+pub fn default_bin() -> PathBuf {
+    match std::env::var_os("ENGRAM_PALACE_BIN") {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from("mempalace"),
+    }
+}
+
+pub fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout_ms: u64,
+) -> Result<std::process::Output, PalaceError> {
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_thread = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(timeout_ms));
+        let _ = tx.send(());
+    });
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => match rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    return Err(PalaceError::Timeout);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            },
+            Err(e) => return Err(PalaceError::Io(e.to_string())),
+        }
+    };
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+impl PalaceSearch for FakePalaceSearch {
+    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<PalaceDrawer>, PalaceError> {
+        match &self.error {
+            Some(err) => Err(err.clone()),
+            None => Ok(self.drawers.clone()),
+        }
+    }
+}
+
+impl PalaceSearch for CliPalaceSearch {
+    fn search(&self, query: &str, limit: usize) -> Result<Vec<PalaceDrawer>, PalaceError> {
+        let limit = limit.min(PALACE_MAX_HITS);
+        let mut child = match Command::new(&self.bin)
+            .args([
+                "search",
+                "--results",
+                &limit.to_string(),
+                &truncate_query(query),
+            ])
+            .current_dir(&self.cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return Err(PalaceError::NotInstalled);
+            }
+            Err(e) => return Err(PalaceError::Io(e.to_string())),
+        };
+        let output = wait_with_timeout(&mut child, self.timeout_ms)?;
+        if !output.stderr.is_empty() {
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let hits = parse_search_output(&stdout);
+        if hits.is_empty() {
+            Err(PalaceError::Unparseable)
+        } else {
+            Ok(hits)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn truncate_query_caps_at_250() {
@@ -175,5 +312,104 @@ mod tests {
     #[test]
     fn parse_empty_is_empty_vec() {
         assert!(parse_search_output("no results\n").is_empty());
+    }
+
+    #[test]
+    fn fake_search_returns_drawers() {
+        let fake = FakePalaceSearch {
+            drawers: vec![PalaceDrawer {
+                wing: "w".into(),
+                room: "r".into(),
+                source: "s".into(),
+                text: "hello".into(),
+            }],
+            error: None,
+        };
+        let hits = fake.search("q", 3).unwrap();
+        assert_eq!(hits[0].text, "hello");
+    }
+
+    #[test]
+    fn fake_search_propagates_not_installed() {
+        let fake = FakePalaceSearch {
+            drawers: vec![],
+            error: Some(PalaceError::NotInstalled),
+        };
+        assert!(matches!(
+            fake.search("q", 3),
+            Err(PalaceError::NotInstalled)
+        ));
+    }
+
+    #[test]
+    fn cli_missing_bin_is_not_installed() {
+        let cli = CliPalaceSearch {
+            bin: PathBuf::from("/this/binary/does/not/exist-engram-test"),
+            cwd: std::env::temp_dir(),
+            timeout_ms: 500,
+        };
+        assert!(matches!(cli.search("q", 3), Err(PalaceError::NotInstalled)));
+    }
+
+    #[test]
+    fn default_bin_uses_env_or_mempalace() {
+        match std::env::var_os("ENGRAM_PALACE_BIN") {
+            Some(p) => assert_eq!(default_bin(), PathBuf::from(p)),
+            None => assert_eq!(default_bin(), PathBuf::from("mempalace")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_timeout_kills_child() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("engram-palace-timeout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("sleep_search");
+        fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+
+        let cli = CliPalaceSearch {
+            bin,
+            cwd: std::env::temp_dir(),
+            timeout_ms: 200,
+        };
+        let started = std::time::Instant::now();
+        assert!(matches!(cli.search("q", 3), Err(PalaceError::Timeout)));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "timeout should kill the child instead of waiting out sleep 5"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_empty_parse_is_unparseable() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("engram-palace-empty-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("empty_search");
+        fs::write(&bin, "#!/bin/sh\necho no results\n").unwrap();
+        let mut perms = fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&bin, perms).unwrap();
+
+        let cli = CliPalaceSearch {
+            bin,
+            cwd: std::env::temp_dir(),
+            timeout_ms: 500,
+        };
+        assert!(matches!(cli.search("q", 3), Err(PalaceError::Unparseable)));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
