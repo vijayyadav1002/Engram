@@ -115,6 +115,8 @@ To also attach up to three [MemPalace](https://github.com/MemPalace/mempalace) d
 engram get-context "why did we choose WebSockets?" --palace
 ```
 
+Commit messages and ADR files (`docs/adr/`, `docs/decisions/`, `adr-123-*.md`) are indexed with the repo. `engram get-context "why WebSockets"` can quote an ADR and a commit subject/body as well as code. Diffs and blame are not included. Re-run `engram index` after new commits.
+
 Debug hatches (not the default agent path):
 
 ```bash

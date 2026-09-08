@@ -27,6 +27,7 @@ pub fn run_doctor(root: &Path) -> Result<String, Error> {
         "counts: files={} symbols={} edges={}",
         meta.file_count, meta.symbol_count, meta.edge_count
     ));
+    lines.extend(git_meta_lines(&meta));
 
     lines.push(present_line(
         ".engramignore",
@@ -81,6 +82,9 @@ root: {}\n\
 files: {}\n\
 symbols: {}\n\
 edges: {}\n\
+commits: {}\n\
+git_head: {}\n\
+git: {}\n\
 indexed_at: {}\n\
 stale_sample: {}/{}\n",
         db.display(),
@@ -89,10 +93,21 @@ stale_sample: {}/{}\n",
         meta.file_count,
         meta.symbol_count,
         meta.edge_count,
+        meta.commit_count,
+        meta.git_head.as_deref().unwrap_or("none"),
+        meta.git_status,
         meta.indexed_at.as_deref().unwrap_or("never"),
         stale,
         checked
     ))
+}
+
+fn git_meta_lines(meta: &crate::store::Meta) -> [String; 3] {
+    [
+        format!("commits: {}", meta.commit_count),
+        format!("git_head: {}", meta.git_head.as_deref().unwrap_or("none")),
+        format!("git: {}", meta.git_status),
+    ]
 }
 
 fn open_doctor_db(db: &Path) -> Result<Store, Error> {
@@ -146,5 +161,42 @@ fn grammar_status() -> String {
         format!("{} ok", ok.join(","))
     } else {
         format!("{} ok; failed {}", ok.join(","), bad.join(","))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn tempfile_dir() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "engram-doctor-{}-{}-{}",
+            std::process::id(),
+            n,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn status_includes_git_meta_lines() {
+        let root = tempfile_dir();
+        std::fs::create_dir_all(root.join(".engram")).unwrap();
+        let store =
+            Store::create(&root.join(".engram/index.sqlite"), root.to_str().unwrap()).unwrap();
+        store.set_git_meta(Some("abc"), 3, "ok").unwrap();
+        drop(store);
+        let out = run_status(&root).unwrap();
+        assert!(out.contains("commits: 3"), "status: {out}");
+        assert!(out.contains("git: ok"), "status: {out}");
     }
 }

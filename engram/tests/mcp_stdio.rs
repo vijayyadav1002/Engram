@@ -63,6 +63,21 @@ fn tools_list_contains_get_context() {
         lower.contains("palace") && resp.contains("include_palace"),
         "get_context description/schema must mention palace and include_palace"
     );
+    let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let tools = v["result"]["tools"].as_array().expect("tools array");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "get_context",
+            "search_symbols",
+            "search_code",
+            "index_status"
+        ]
+    );
+    assert!(!names
+        .iter()
+        .any(|n| n.contains("search_git") || n.contains("save_decision")));
 }
 
 #[test]
