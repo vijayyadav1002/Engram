@@ -39,3 +39,17 @@ fn bin_status_without_init_exits_not_initialized() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn get_context_help_mentions_palace() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_engram"))
+        .args(["get-context", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--palace"),
+        "get-context --help must list --palace; got:\n{stdout}"
+    );
+}

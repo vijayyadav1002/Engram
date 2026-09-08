@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use engram::compile::{get_context, search_code, search_symbols, DEFAULT_BUDGET};
+use engram::compile::{get_context_with, search_code, search_symbols, GetContextOpts, DEFAULT_BUDGET};
 use engram::doctor::{run_doctor, run_status};
 use engram::error::Error;
 use engram::index::{index_repo, IndexStats};
@@ -46,6 +46,9 @@ enum Commands {
         json: bool,
         #[arg(long, default_value_t = DEFAULT_BUDGET)]
         budget: u32,
+        /// Attach optional MemPalace drawers when available
+        #[arg(long)]
+        palace: bool,
     },
     /// Debug: symbol lookup
     SearchSymbols { name: String },
@@ -104,8 +107,18 @@ fn dispatch(cli: Cli) -> Result<(), Error> {
             query,
             json,
             budget,
+            palace,
         } => {
-            let pkg = get_context(&require_root()?, &query, budget)?;
+            let include_palace = if palace { Some(true) } else { None };
+            let pkg = get_context_with(
+                &require_root()?,
+                &query,
+                budget,
+                GetContextOpts {
+                    include_palace,
+                    palace_search: None,
+                },
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&pkg).expect("json"));
             } else {

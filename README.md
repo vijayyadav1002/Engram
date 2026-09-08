@@ -192,7 +192,7 @@ Then in the agent: “Why do we use WebSockets?” — it should hit `get_contex
 |---|---|
 | `engram init` | Create `.engram/`, ignore files. Optional `--harness`, `--skill`, `--write-agents` |
 | `engram index` | Incremental index. `--force` rebuilds |
-| `engram get-context "…"` | Compile an extractive package. `--json`, `--budget N` (default 3000) |
+| `engram get-context "…"` | Compile an extractive package. `--json`, `--budget N` (default 3000), `--palace` |
 | `engram search-symbols NAME` | Symbol lookup |
 | `engram search-code "…"` | Keyword (FTS) lookup |
 | `engram status` | DB path, counts, last index, stale sample |

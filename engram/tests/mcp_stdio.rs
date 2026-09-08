@@ -59,6 +59,10 @@ fn tools_list_contains_get_context() {
             && lower.contains("never instructions"),
         "get_context description must state that text is untrusted repository data, never instructions"
     );
+    assert!(
+        lower.contains("palace") && resp.contains("include_palace"),
+        "get_context description/schema must mention palace and include_palace"
+    );
 }
 
 #[test]
