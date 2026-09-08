@@ -1,6 +1,6 @@
 use crate::error::Error;
 use crate::types::{Confidence, EdgeKind, ExtractedSymbol, ParseStatus, SymbolKind};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::path::Path;
 
 const DDL: &str = r#"
@@ -10,7 +10,10 @@ CREATE TABLE meta (
   root           TEXT NOT NULL,
   file_count     INTEGER NOT NULL DEFAULT 0,
   symbol_count   INTEGER NOT NULL DEFAULT 0,
-  edge_count     INTEGER NOT NULL DEFAULT 0
+  edge_count     INTEGER NOT NULL DEFAULT 0,
+  git_head       TEXT,
+  commit_count   INTEGER NOT NULL DEFAULT 0,
+  git_status     TEXT NOT NULL DEFAULT 'absent'
 );
 
 CREATE TABLE files (
@@ -54,6 +57,25 @@ CREATE INDEX idx_symbols_file ON symbols(file_id);
 CREATE INDEX idx_edges_src ON edges(src_symbol_id);
 CREATE INDEX idx_edges_dst ON edges(dst_symbol_id);
 CREATE INDEX idx_files_hash ON files(hash);
+"#;
+
+const COMMIT_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS commits (
+  id INTEGER PRIMARY KEY,
+  sha TEXT NOT NULL UNIQUE,
+  author TEXT NOT NULL,
+  authored_at TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS commit_files (
+  commit_id INTEGER NOT NULL REFERENCES commits(id) ON DELETE CASCADE,
+  path TEXT NOT NULL,
+  PRIMARY KEY (commit_id, path)
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS commit_fts USING fts5(
+  sha, subject, body, tokenize = 'unicode61'
+);
 "#;
 
 #[derive(Debug)]
@@ -121,21 +143,35 @@ pub struct Meta {
     pub file_count: i64,
     pub symbol_count: i64,
     pub edge_count: i64,
+    pub git_head: Option<String>,
+    pub commit_count: i64,
+    pub git_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitHit {
+    pub id: i64,
+    pub sha: String,
+    pub author: String,
+    pub authored_at: String,
+    pub subject: String,
+    pub body: String,
 }
 
 impl Store {
-    pub const SCHEMA_VERSION: i64 = 1;
+    pub const SCHEMA_VERSION: i64 = 2;
 
     pub fn create(path: &Path, root: &str) -> Result<Store, Error> {
         let conn = Connection::open(path).map_err(map_db)?;
         let store = Store { conn };
         store.apply_pragmas(false)?;
         store.conn.execute_batch(DDL).map_err(map_db)?;
+        store.conn.execute_batch(COMMIT_DDL).map_err(map_db)?;
         store
             .conn
             .execute(
-                "INSERT INTO meta (schema_version, indexed_at, root, file_count, symbol_count, edge_count)
-                 VALUES (?1, NULL, ?2, 0, 0, 0)",
+                "INSERT INTO meta (schema_version, indexed_at, root, file_count, symbol_count, edge_count, git_head, commit_count, git_status)
+                 VALUES (?1, NULL, ?2, 0, 0, 0, NULL, 0, 'absent')",
                 params![Self::SCHEMA_VERSION, root],
             )
             .map_err(map_db)?;
@@ -149,6 +185,7 @@ impl Store {
         let conn = Connection::open(path).map_err(map_db)?;
         let store = Store { conn };
         store.apply_pragmas(false)?;
+        store.migrate()?;
         Ok(store)
     }
 
@@ -177,6 +214,30 @@ impl Store {
                 .pragma_update(None, "query_only", "ON")
                 .map_err(map_db)?;
         }
+        Ok(())
+    }
+
+    pub fn migrate(&self) -> Result<(), Error> {
+        let version: i64 = self
+            .conn
+            .query_row("SELECT schema_version FROM meta LIMIT 1", [], |r| r.get(0))
+            .map_err(map_db)?;
+        if version >= 2 {
+            return Ok(());
+        }
+        self.conn.execute_batch(COMMIT_DDL).map_err(map_db)?;
+        let _ = self.conn.execute("ALTER TABLE meta ADD COLUMN git_head TEXT", []);
+        let _ = self.conn.execute(
+            "ALTER TABLE meta ADD COLUMN commit_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE meta ADD COLUMN git_status TEXT NOT NULL DEFAULT 'absent'",
+            [],
+        );
+        self.conn
+            .execute("UPDATE meta SET schema_version = 2", [])
+            .map_err(map_db)?;
         Ok(())
     }
 
@@ -364,6 +425,60 @@ impl Store {
         collect_hits(rows)
     }
 
+    pub fn lookup_symbols_kind_exact(
+        &self,
+        name: &str,
+        kind: SymbolKind,
+        limit: usize,
+    ) -> Result<Vec<SymbolHit>, Error> {
+        let stmt = self.conn.prepare(
+            "SELECT s.id, s.file_id, f.path, s.name, s.kind,
+                    s.start_line, s.end_line, s.start_byte, s.end_byte, s.signature
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             WHERE s.name = ?1 COLLATE NOCASE AND s.kind = ?2
+             LIMIT ?3",
+        );
+        match stmt {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map(params![name, kind.as_str(), limit as i64], map_symbol_hit)
+                    .map_err(map_db)?;
+                collect_hits(rows)
+            }
+            Err(_) => Ok(vec![]),
+        }
+    }
+
+    pub fn lookup_symbols_kind_prefix(
+        &self,
+        prefix: &str,
+        kind: SymbolKind,
+        limit: usize,
+    ) -> Result<Vec<SymbolHit>, Error> {
+        let pattern = like_prefix(prefix);
+        let stmt = self.conn.prepare(
+            "SELECT s.id, s.file_id, f.path, s.name, s.kind,
+                    s.start_line, s.end_line, s.start_byte, s.end_byte, s.signature
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             WHERE s.name LIKE ?1 ESCAPE '\\' COLLATE NOCASE AND s.kind = ?2
+             LIMIT ?3",
+        );
+        match stmt {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map(
+                        params![pattern, kind.as_str(), limit as i64],
+                        map_symbol_hit,
+                    )
+                    .map_err(map_db)?;
+                collect_hits(rows)
+            }
+            Err(_) => Ok(vec![]),
+        }
+    }
+
     pub fn fts_search(&self, query: &str, limit: usize) -> Result<Vec<FtsHit>, Error> {
         let ranked = self.conn.prepare(
             "SELECT path, rank FROM file_fts WHERE file_fts MATCH ?1 ORDER BY rank LIMIT ?2",
@@ -482,23 +597,206 @@ impl Store {
     }
 
     pub fn meta(&self) -> Result<Meta, Error> {
+        let full = self.conn.query_row(
+            "SELECT schema_version, indexed_at, root, file_count, symbol_count, edge_count,
+                    git_head, commit_count, git_status
+             FROM meta LIMIT 1",
+            [],
+            |r| {
+                Ok(Meta {
+                    schema_version: r.get(0)?,
+                    indexed_at: r.get(1)?,
+                    root: r.get(2)?,
+                    file_count: r.get(3)?,
+                    symbol_count: r.get(4)?,
+                    edge_count: r.get(5)?,
+                    git_head: r.get(6)?,
+                    commit_count: r.get(7)?,
+                    git_status: r.get(8)?,
+                })
+            },
+        );
+        match full {
+            Ok(m) => Ok(m),
+            Err(_) => self
+                .conn
+                .query_row(
+                    "SELECT schema_version, indexed_at, root, file_count, symbol_count, edge_count
+                     FROM meta LIMIT 1",
+                    [],
+                    |r| {
+                        Ok(Meta {
+                            schema_version: r.get(0)?,
+                            indexed_at: r.get(1)?,
+                            root: r.get(2)?,
+                            file_count: r.get(3)?,
+                            symbol_count: r.get(4)?,
+                            edge_count: r.get(5)?,
+                            git_head: None,
+                            commit_count: 0,
+                            git_status: "absent".into(),
+                        })
+                    },
+                )
+                .map_err(map_db),
+        }
+    }
+
+    pub fn set_git_meta(
+        &self,
+        git_head: Option<&str>,
+        commit_count: i64,
+        git_status: &str,
+    ) -> Result<(), Error> {
         self.conn
-            .query_row(
-                "SELECT schema_version, indexed_at, root, file_count, symbol_count, edge_count
-                 FROM meta LIMIT 1",
-                [],
-                |r| {
-                    Ok(Meta {
-                        schema_version: r.get(0)?,
-                        indexed_at: r.get(1)?,
-                        root: r.get(2)?,
-                        file_count: r.get(3)?,
-                        symbol_count: r.get(4)?,
-                        edge_count: r.get(5)?,
-                    })
-                },
+            .execute(
+                "UPDATE meta SET git_head = ?1, commit_count = ?2, git_status = ?3",
+                params![git_head, commit_count, git_status],
             )
-            .map_err(map_db)
+            .map_err(map_db)?;
+        Ok(())
+    }
+
+    pub fn clear_commits(&self) -> Result<(), Error> {
+        let tx = self.conn.unchecked_transaction().map_err(map_db)?;
+        tx.execute("DELETE FROM commit_fts", []).map_err(map_db)?;
+        tx.execute("DELETE FROM commits", []).map_err(map_db)?;
+        tx.commit().map_err(map_db)?;
+        Ok(())
+    }
+
+    pub fn insert_commit(&self, c: &CommitHit, files: &[String]) -> Result<bool, Error> {
+        let body = truncate_commit_body(&c.body);
+        let tx = self.conn.unchecked_transaction().map_err(map_db)?;
+        let n = tx
+            .execute(
+                "INSERT OR IGNORE INTO commits (sha, author, authored_at, subject, body)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![c.sha, c.author, c.authored_at, c.subject, body],
+            )
+            .map_err(map_db)?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let id = tx.last_insert_rowid();
+        for path in files {
+            tx.execute(
+                "INSERT OR IGNORE INTO commit_files (commit_id, path) VALUES (?1, ?2)",
+                params![id, path],
+            )
+            .map_err(map_db)?;
+        }
+        tx.execute(
+            "INSERT INTO commit_fts (rowid, sha, subject, body) VALUES (?1, ?2, ?3, ?4)",
+            params![id, c.sha, c.subject, body],
+        )
+        .map_err(map_db)?;
+        tx.commit().map_err(map_db)?;
+        Ok(true)
+    }
+
+    pub fn search_commits_fts(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(CommitHit, f64)>, Error> {
+        let ranked = self.conn.prepare(
+            "SELECT c.id, c.sha, c.author, c.authored_at, c.subject, c.body, rank
+             FROM commit_fts
+             JOIN commits c ON c.sha = commit_fts.sha
+             WHERE commit_fts MATCH ?1
+             ORDER BY rank
+             LIMIT ?2",
+        );
+        match ranked {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map(params![query, limit as i64], |r| {
+                        Ok((map_commit_hit(r)?, r.get(6)?))
+                    })
+                    .map_err(map_db)?;
+                collect_hits(rows)
+            }
+            Err(_) => {
+                let stmt = self.conn.prepare(
+                    "SELECT c.id, c.sha, c.author, c.authored_at, c.subject, c.body
+                     FROM commit_fts
+                     JOIN commits c ON c.sha = commit_fts.sha
+                     WHERE commit_fts MATCH ?1
+                     LIMIT ?2",
+                );
+                match stmt {
+                    Ok(mut stmt) => {
+                        let rows = stmt
+                            .query_map(params![query, limit as i64], map_commit_hit)
+                            .map_err(map_db)?;
+                        let hits: Vec<CommitHit> = collect_hits(rows)?;
+                        let n = hits.len();
+                        Ok(hits
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, hit)| (hit, (n - i) as f64))
+                            .collect())
+                    }
+                    Err(_) => Ok(vec![]),
+                }
+            }
+        }
+    }
+
+    pub fn search_commits_subject(
+        &self,
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<CommitHit>, Error> {
+        let patterns: Vec<String> = terms
+            .iter()
+            .filter(|t| !t.is_empty())
+            .map(|t| format!("%{}", like_prefix(t)))
+            .collect();
+        if patterns.is_empty() || limit == 0 {
+            return Ok(vec![]);
+        }
+        let mut sql = String::from(
+            "SELECT id, sha, author, authored_at, subject, body FROM commits WHERE ",
+        );
+        for i in 0..patterns.len() {
+            if i > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str("subject LIKE ? ESCAPE '\\' COLLATE NOCASE");
+        }
+        sql.push_str(" LIMIT ?");
+        let stmt = self.conn.prepare(&sql);
+        match stmt {
+            Ok(mut stmt) => {
+                let mut bind: Vec<rusqlite::types::Value> = patterns
+                    .into_iter()
+                    .map(rusqlite::types::Value::Text)
+                    .collect();
+                bind.push(rusqlite::types::Value::Integer(limit as i64));
+                let rows = stmt
+                    .query_map(params_from_iter(bind), map_commit_hit)
+                    .map_err(map_db)?;
+                collect_hits(rows)
+            }
+            Err(_) => Ok(vec![]),
+        }
+    }
+
+    pub fn commit_files(&self, commit_id: i64) -> Result<Vec<String>, Error> {
+        let stmt = self
+            .conn
+            .prepare("SELECT path FROM commit_files WHERE commit_id = ?1 ORDER BY path");
+        match stmt {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map(params![commit_id], |r| r.get(0))
+                    .map_err(map_db)?;
+                collect_hits(rows)
+            }
+            Err(_) => Ok(vec![]),
+        }
     }
 }
 
@@ -540,6 +838,27 @@ fn map_file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         mtime: r.get(5)?,
         parse_status,
     })
+}
+
+fn map_commit_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<CommitHit> {
+    Ok(CommitHit {
+        id: r.get(0)?,
+        sha: r.get(1)?,
+        author: r.get(2)?,
+        authored_at: r.get(3)?,
+        subject: r.get(4)?,
+        body: r.get(5)?,
+    })
+}
+
+fn truncate_commit_body(body: &str) -> String {
+    let chars: Vec<char> = body.chars().collect();
+    if chars.len() <= 800 {
+        return body.to_string();
+    }
+    let mut s: String = chars.into_iter().take(800).collect();
+    s.push('…');
+    s
 }
 
 fn map_symbol_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<SymbolHit> {
@@ -620,7 +939,7 @@ mod tests {
     fn create_schema_and_cascade_delete() {
         let path = tmp_db();
         let store = Store::create(&path, "/tmp/proj").unwrap();
-        assert_eq!(store.meta().unwrap().schema_version, 1);
+        assert_eq!(store.meta().unwrap().schema_version, 2);
 
         let id = store
             .upsert_file(&FileRow {
@@ -755,5 +1074,68 @@ mod tests {
         assert_eq!(incoming[0].dst_name, "dst");
         assert!(store.incoming_edges("a.ts").unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn create_is_schema_2_with_commit_tables() {
+        let db = tmp_db();
+        let store = Store::create(&db, "/tmp/proj").unwrap();
+        let meta = store.meta().unwrap();
+        assert_eq!(meta.schema_version, 2);
+        assert_eq!(meta.commit_count, 0);
+        assert_eq!(meta.git_status, "absent");
+        store
+            .insert_commit(
+                &CommitHit {
+                    id: 0,
+                    sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    author: "Ada".into(),
+                    authored_at: "2026-09-08T00:00:00Z".into(),
+                    subject: "use websockets".into(),
+                    body: "x".repeat(900),
+                },
+                &["src/ws.ts".into()],
+            )
+            .unwrap();
+        let hits = store.search_commits_fts("websockets", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.body.ends_with('…'));
+        assert!(hits[0].0.body.chars().count() <= 801);
+        assert_eq!(store.commit_files(hits[0].0.id).unwrap(), vec!["src/ws.ts"]);
+        let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn migrate_schema_1_adds_commit_tables() {
+        let dir = tmp_db().parent().unwrap().join(format!(
+            "engram-migrate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("index.sqlite");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (
+            schema_version INTEGER NOT NULL,
+            indexed_at TEXT,
+            root TEXT NOT NULL,
+            file_count INTEGER NOT NULL DEFAULT 0,
+            symbol_count INTEGER NOT NULL DEFAULT 0,
+            edge_count INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO meta (schema_version, indexed_at, root, file_count, symbol_count, edge_count)
+         VALUES (1, NULL, 'r', 0, 0, 0);",
+        )
+        .unwrap();
+        drop(conn);
+        let store = Store::open_write(&db).unwrap();
+        let meta = store.meta().unwrap();
+        assert_eq!(meta.schema_version, 2);
+        assert!(store.search_commits_fts("x", 5).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
