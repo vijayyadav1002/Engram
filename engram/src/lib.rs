@@ -7,6 +7,7 @@ pub mod ignore;
 pub mod index;
 pub mod init;
 pub mod mcp;
+pub mod palace;
 pub mod render;
 pub mod root;
 pub mod secret;
