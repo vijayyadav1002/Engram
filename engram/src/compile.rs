@@ -1,11 +1,17 @@
 use crate::error::Error;
 use crate::hash::blake3_file;
+use crate::palace::{
+    default_bin, read_config_text, resolve_opt_in, truncate_drawer_text, CliPalaceSearch,
+    PalaceError, PalaceSearch, PALACE_MAX_HITS, PALACE_MIN_REMAINING, PALACE_TIMEOUT_MS,
+};
 use crate::store::{FtsHit, NeighborHit, Store, SymbolHit};
 use crate::types::{
-    Confidence, ContextEdge, ContextItem, ContextPackage, ContextStats, EdgeKind, SymbolKind,
+    Confidence, ContextEdge, ContextItem, ContextPackage, ContextStats, EdgeKind, PalaceStats,
+    SymbolKind,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 pub const CAP_SYMBOLS: usize = 50;
 pub const CAP_FTS: usize = 30;
@@ -72,7 +78,22 @@ pub fn search_code(root: &Path, query: &str, limit: usize) -> Result<Vec<FtsHit>
     fts_try(&store, query, limit)
 }
 
+#[derive(Default)]
+pub struct GetContextOpts {
+    pub include_palace: Option<bool>,
+    pub palace_search: Option<Arc<dyn PalaceSearch>>,
+}
+
 pub fn get_context(root: &Path, query: &str, budget_tokens: u32) -> Result<ContextPackage, Error> {
+    get_context_with(root, query, budget_tokens, GetContextOpts::default())
+}
+
+pub fn get_context_with(
+    root: &Path,
+    query: &str,
+    budget_tokens: u32,
+    opts: GetContextOpts,
+) -> Result<ContextPackage, Error> {
     let store = Store::open_read(&root.join(".engram/index.sqlite"))?;
     let plan = plan_query(query);
 
@@ -227,6 +248,7 @@ pub fn get_context(root: &Path, query: &str, budget_tokens: u32) -> Result<Conte
     pkg.stats.stale_index = stale_index_flag(pkg.stats.stale_omitted, pkg.items.len());
 
     enforce_json_cap(&mut pkg, &neighbor_edges);
+    attach_palace(&mut pkg, root, query, budget_tokens, &opts, &neighbor_edges);
     Ok(pkg)
 }
 
@@ -715,8 +737,107 @@ fn read_span(path: &Path, start_line: u32, end_line: u32) -> Result<String, Erro
     Ok(lines[start..end].join("\n"))
 }
 
-fn token_cost(text: &str) -> u32 {
+pub(crate) fn token_cost(text: &str) -> u32 {
     text.split_whitespace().count() as u32 + 2
+}
+
+fn palace_stats(status: &str) -> PalaceStats {
+    PalaceStats {
+        status: status.to_string(),
+        attempted: 0,
+        included: 0,
+        dropped_for_budget: 0,
+    }
+}
+
+fn attach_palace(
+    pkg: &mut ContextPackage,
+    root: &Path,
+    query: &str,
+    budget_tokens: u32,
+    opts: &GetContextOpts,
+    neighbors: &[NeighborHit],
+) {
+    let env = std::env::var("ENGRAM_PALACE").ok();
+    let cfg = read_config_text(root);
+    if !resolve_opt_in(opts.include_palace, env.as_deref(), cfg.as_deref()) {
+        return;
+    }
+    let remaining = budget_tokens.saturating_sub(pkg.used_tokens);
+    if remaining < PALACE_MIN_REMAINING {
+        pkg.stats.palace = Some(palace_stats("ok"));
+        return;
+    }
+    let searcher = opts.palace_search.clone().unwrap_or_else(|| {
+        Arc::new(CliPalaceSearch {
+            bin: default_bin(),
+            cwd: root.to_path_buf(),
+            timeout_ms: PALACE_TIMEOUT_MS,
+        })
+    });
+    match searcher.search(query, PALACE_MAX_HITS) {
+        Err(PalaceError::NotInstalled) => {
+            pkg.stats.palace = Some(palace_stats("not_installed"));
+        }
+        Err(PalaceError::Timeout) => {
+            pkg.stats.palace = Some(palace_stats("timeout"));
+        }
+        Err(PalaceError::Unparseable) | Err(PalaceError::Io(_)) => {
+            pkg.stats.palace = Some(palace_stats("unparseable"));
+        }
+        Ok(drawers) => {
+            let drawers: Vec<_> = drawers.into_iter().take(PALACE_MAX_HITS).collect();
+            let attempted = drawers.len() as u32;
+            let mut included = 0u32;
+            let mut dropped_for_budget = 0u32;
+            for d in drawers {
+                let text = truncate_drawer_text(&d.text);
+                let cost = token_cost(&text);
+                let item = ContextItem {
+                    path: format!("palace://{}/{}", d.wing, d.room),
+                    start_line: 1,
+                    end_line: 1,
+                    symbol: None,
+                    kind: Some("palace".into()),
+                    text,
+                    why: vec!["palace".into()],
+                };
+                if pkg.used_tokens + cost > budget_tokens {
+                    dropped_for_budget += 1;
+                    break;
+                }
+                pkg.items.push(item);
+                let over_json = serde_json::to_vec(pkg)
+                    .map(|bytes| bytes.len() > MAX_JSON_BYTES)
+                    .unwrap_or(true);
+                if over_json {
+                    pkg.items.pop();
+                    dropped_for_budget += 1;
+                    break;
+                }
+                pkg.used_tokens += cost;
+                included += 1;
+            }
+            pkg.stats.palace = Some(PalaceStats {
+                status: "ok".into(),
+                attempted,
+                included,
+                dropped_for_budget,
+            });
+            enforce_json_cap(pkg, neighbors);
+            if let Some(p) = pkg.stats.palace.as_mut() {
+                let kept = pkg
+                    .items
+                    .iter()
+                    .filter(|i| i.kind.as_deref() == Some("palace"))
+                    .count() as u32;
+                if kept < p.included {
+                    p.dropped_for_budget += p.included - kept;
+                    p.included = kept;
+                }
+            }
+        }
+    }
 }
 
 fn package_edges(items: &[ContextItem], neighbors: &[NeighborHit]) -> Vec<ContextEdge> {
