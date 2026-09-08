@@ -20,17 +20,29 @@ args = [\"mcp\"]
 ";
 
 const SKILL_MD: &str = "\
-# Engram
+# Engram + MemPalace
 
-Call `get_context` first for repo questions; do not grep the tree until the
-package is empty or `stale_index` is true.
+Call Engram `get_context` first for repo questions; do not grep the tree until
+the package is empty or `stale_index` is true.
+
+Call MemPalace `mempalace_search` first for prior sessions, decisions, and
+people. Quote drawers verbatim.
+
+For \"why did we…\" call `get_context` then palace search. If they conflict,
+current code wins.
 ";
 
 const AGENTS_BLURB: &str = "\
-## Engram
+## Engram + MemPalace
 
-Prefer `get_context` before searching the repo; do not grep until the package
-is empty or `stale_index` is true.
+Prefer Engram `get_context` before searching the repo; do not grep until the
+package is empty or `stale_index` is true.
+
+Prefer MemPalace `mempalace_search` for prior decisions and sessions; quote
+drawers verbatim.
+
+For \"why\" questions use both (Engram first). If they conflict, current code
+wins.
 ";
 
 /// Create `.engram/`, empty DB, default `.engramignore`, and a gitignore entry.

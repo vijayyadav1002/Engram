@@ -229,6 +229,27 @@ cargo run -- get-context "your question"
 
 This crate is mostly Rust, so the **graph** will look small (TypeScript/Python fixtures plus file-level search). For a fuller graph, index a TypeScript or Python app as in the steps above.
 
+## Alongside MemPalace
+
+Engram is the **current repo**. MemPalace is **what you already said and decided**. Configure both MCP servers in the same project. Do not mine the source tree into the palace as a substitute for `engram index`.
+
+Router (also in `AGENTS.md` and `.grok/skills/engram/SKILL.md`):
+
+| Question | First tool |
+|---|---|
+| Where / how is this implemented? | Engram `get_context` |
+| What did we decide? Last session? Who? | MemPalace `mempalace_search` |
+| Why did we choose X? | `get_context`, then palace search. **Code wins** if they disagree. |
+
+```bash
+# in your app
+engram init --harness grok --skill --write-agents
+engram index
+# MemPalace MCP should already be in Grok/Claude/Cursor config
+```
+
+Optional next slice: `get_context` can attach up to three palace drawers in the same package (off by default). Spec: `docs/superpowers/specs/2026-09-08-engram-mempalace-bridge-design.md`.
+
 ## Privacy
 
 Index, source, and queries stay on disk. Core does not call a network API. Optional remote models are not part of this build.
