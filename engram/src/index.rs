@@ -1,14 +1,16 @@
 use crate::error::Error;
 use crate::extract::extract_path;
+use crate::git::{CliGitSource, GitError, GitIndexStatus, GitRange, GitSource};
 use crate::hash::blake3_hex;
 use crate::ignore::{should_skip, SkipKind, MAX_FILE_BYTES};
-use crate::store::{FileRow, IncomingEdge, Store};
+use crate::store::{CommitHit, FileRow, IncomingEdge, Store};
 use crate::types::{Confidence, EdgeKind, ExtractedEdge, Extraction, ParseStatus, SymbolKind};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 const SKIP_DIRS: &[&str] = &[
@@ -37,6 +39,12 @@ pub struct IndexStats {
     pub skipped_ignore: u64,
     pub errors: u64,
     pub unchanged: u64,
+    pub commits: u64,
+    pub git: GitIndexStatus,
+}
+
+pub struct IndexOpts {
+    pub git: Option<Arc<dyn GitSource>>,
 }
 
 struct WorkItem {
@@ -60,6 +68,10 @@ enum Outcome {
 ///
 /// The database must already exist (`Store::create` / `engram init`).
 pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
+    index_repo_with(root, force, IndexOpts { git: None })
+}
+
+pub fn index_repo_with(root: &Path, force: bool, opts: IndexOpts) -> Result<IndexStats, Error> {
     let db_path = root.join(".engram/index.sqlite");
     let store = Store::open_write(&db_path)?;
 
@@ -174,7 +186,84 @@ pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
     stats.files = file_count as u64;
     stats.symbols = symbol_count as u64;
     stats.edges = edge_count as u64;
+    index_git(&store, root, force, opts, &mut stats)?;
     Ok(stats)
+}
+
+fn map_git_err(e: GitError) -> GitIndexStatus {
+    match e {
+        GitError::NotInstalled => GitIndexStatus::NotInstalled,
+        GitError::NoRepo => GitIndexStatus::Absent,
+        GitError::Timeout => GitIndexStatus::Timeout,
+        GitError::Unparseable => GitIndexStatus::Unparseable,
+        GitError::Io(_) => GitIndexStatus::Unparseable,
+    }
+}
+
+fn git_fail(store: &Store, stats: &mut IndexStats, status: GitIndexStatus) -> Result<(), Error> {
+    let meta = store.meta()?;
+    store.set_git_meta(meta.git_head.as_deref(), meta.commit_count, status.as_str())?;
+    stats.git = status;
+    stats.commits = meta.commit_count as u64;
+    Ok(())
+}
+
+fn index_git(
+    store: &Store,
+    root: &Path,
+    force: bool,
+    opts: IndexOpts,
+    stats: &mut IndexStats,
+) -> Result<(), Error> {
+    if force {
+        store.clear_commits()?;
+        store.set_git_meta(None, 0, "absent")?;
+    }
+
+    if !root.join(".git").exists() {
+        let meta = store.meta()?;
+        stats.git = GitIndexStatus::Absent;
+        stats.commits = meta.commit_count as u64;
+        return Ok(());
+    }
+
+    let git = opts
+        .git
+        .unwrap_or_else(|| Arc::new(CliGitSource::default()));
+    let head = match git.head_sha(root) {
+        Ok(h) => h,
+        Err(e) => return git_fail(store, stats, map_git_err(e)),
+    };
+
+    let meta = store.meta()?;
+    let range = match &meta.git_head {
+        Some(old) if git.is_ancestor(root, old, &head) == Ok(true) => GitRange::After(old.clone()),
+        _ => GitRange::Head,
+    };
+
+    let commits = match git.log(root, range) {
+        Ok(c) => c,
+        Err(e) => return git_fail(store, stats, map_git_err(e)),
+    };
+
+    let mut count = meta.commit_count;
+    for c in commits {
+        let hit = CommitHit {
+            id: 0,
+            sha: c.sha,
+            author: c.author,
+            authored_at: c.authored_at,
+            subject: c.subject,
+            body: c.body,
+        };
+        if store.insert_commit(&hit, &c.files)? {
+            count += 1;
+        }
+    }
+    store.set_git_meta(Some(&head), count, "ok")?;
+    stats.git = GitIndexStatus::Ok;
+    stats.commits = count as u64;
+    Ok(())
 }
 
 fn bump_skip(stats: &mut IndexStats, kind: SkipKind) {
@@ -417,7 +506,24 @@ fn resolve_edge(
             }
             Ok(None)
         }
-        EdgeKind::Supersedes => Ok(None),
+        EdgeKind::Supersedes => {
+            let mut hits =
+                store.lookup_symbols_kind_exact(&edge.dst_name, SymbolKind::Decision, 8)?;
+            if hits.is_empty()
+                && !edge.dst_name.is_empty()
+                && edge.dst_name.chars().all(|c| c.is_ascii_digit())
+            {
+                hits = store.lookup_symbols_kind_exact(
+                    &format!("ADR-{}", edge.dst_name),
+                    SymbolKind::Decision,
+                    8,
+                )?;
+            }
+            let Some(hit) = hits.into_iter().next() else {
+                return Ok(None);
+            };
+            Ok(Some((src, hit.id, EdgeKind::Supersedes, Confidence::High)))
+        }
     }
 }
 
@@ -508,12 +614,43 @@ fn strip_ext(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::{FakeGitSource, GitCommit, GitError, GitIndexStatus};
+    use crate::store::Store;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
     fn tmp() -> std::path::PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("engram-index-{}-{}", std::process::id(), n))
+    }
+
+    fn indexed_repo() -> (std::path::PathBuf, FakeGitSource) {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join(".engram")).unwrap();
+        std::fs::write(
+            dir.join("src/a.ts"),
+            "export function ping() { return 1 }\n",
+        )
+        .unwrap();
+        Store::create(&dir.join(".engram/index.sqlite"), dir.to_str().unwrap()).unwrap();
+        let fake = FakeGitSource {
+            head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            ancestor: false,
+            commits: vec![GitCommit {
+                sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                author: "Ada".into(),
+                authored_at: "2026-01-01T00:00:00Z".into(),
+                subject: "use websockets".into(),
+                body: "replace polling".into(),
+                files: vec!["src/a.ts".into()],
+            }],
+            head_err: None,
+            log_err: None,
+        };
+        (dir, fake)
     }
 
     #[test]
@@ -535,5 +672,92 @@ mod tests {
         let err = index_repo(&dir, false).unwrap_err();
         assert!(matches!(err, Error::NotInitialized));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn index_inserts_fake_commit() {
+        let (dir, fake) = indexed_repo();
+        let stats = index_repo_with(
+            &dir,
+            false,
+            IndexOpts {
+                git: Some(Arc::new(fake)),
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.git, GitIndexStatus::Ok);
+        assert_eq!(stats.commits, 1);
+        assert!(stats.files >= 1);
+        let store = Store::open_read(&dir.join(".engram/index.sqlite")).unwrap();
+        assert_eq!(store.search_commits_fts("websockets", 5).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn incremental_second_commit_only_inserts_new() {
+        let (dir, mut fake) = indexed_repo();
+        index_repo_with(
+            &dir,
+            false,
+            IndexOpts {
+                git: Some(Arc::new(fake.clone())),
+            },
+        )
+        .unwrap();
+        fake.ancestor = true;
+        fake.head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into();
+        fake.commits = vec![GitCommit {
+            sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            author: "Ada".into(),
+            authored_at: "2026-01-02T00:00:00Z".into(),
+            subject: "tweak".into(),
+            body: String::new(),
+            files: vec!["src/a.ts".into()],
+        }];
+        let stats = index_repo_with(
+            &dir,
+            false,
+            IndexOpts {
+                git: Some(Arc::new(fake)),
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.commits, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_git_still_indexes_files() {
+        let (dir, mut fake) = indexed_repo();
+        fake.head_err = Some(GitError::NotInstalled);
+        let stats = index_repo_with(
+            &dir,
+            false,
+            IndexOpts {
+                git: Some(Arc::new(fake)),
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.git, GitIndexStatus::NotInstalled);
+        assert!(stats.files >= 1);
+        assert_eq!(stats.commits, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_dot_git_is_absent() {
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join(".engram")).unwrap();
+        std::fs::write(
+            dir.join("src/a.ts"),
+            "export function ping() { return 1 }\n",
+        )
+        .unwrap();
+        Store::create(&dir.join(".engram/index.sqlite"), dir.to_str().unwrap()).unwrap();
+        let stats = index_repo(&dir, false).unwrap();
+        assert_eq!(stats.git, GitIndexStatus::Absent);
+        assert!(stats.files >= 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

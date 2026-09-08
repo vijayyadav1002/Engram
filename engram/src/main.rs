@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use engram::compile::{get_context_with, search_code, search_symbols, GetContextOpts, DEFAULT_BUDGET};
+use engram::compile::{
+    get_context_with, search_code, search_symbols, GetContextOpts, DEFAULT_BUDGET,
+};
 use engram::doctor::{run_doctor, run_status};
 use engram::error::Error;
 use engram::index::{index_repo, IndexStats};
@@ -168,4 +170,6 @@ fn print_index_stats(stats: &IndexStats) {
     println!("edges: {}", stats.edges);
     println!("skipped: {}", skipped);
     println!("errors: {}", stats.errors);
+    println!("commits: {}", stats.commits);
+    println!("git: {}", stats.git.as_str());
 }

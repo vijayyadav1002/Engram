@@ -36,9 +36,10 @@ pub enum GitRange {
     After(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GitIndexStatus {
     Ok,
+    #[default]
     Absent,
     NotInstalled,
     Timeout,
