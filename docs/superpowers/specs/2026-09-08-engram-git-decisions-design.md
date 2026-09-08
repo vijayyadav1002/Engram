@@ -1,7 +1,7 @@
 # Engram Git + Decisions Design
 
 Date: 2026-09-08
-Status: draft, pending user review
+Status: approved, pending implementation
 Scope: incremental git commit index + ADR extract as ranked `get_context` candidates (slice after Core + palace)
 Depends on: `docs/superpowers/specs/2026-09-07-engram-core-design.md`
 Related: `docs/superpowers/specs/2026-09-08-engram-mempalace-bridge-design.md` (palace still last, opt-in)
