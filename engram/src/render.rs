@@ -42,7 +42,7 @@ pub fn render_digest(pkg: &ContextPackage) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::{ContextItem, ContextPackage, ContextStats};
+    use crate::types::{ContextItem, ContextPackage, ContextStats, GitStats};
 
     fn sample_package() -> ContextPackage {
         ContextPackage {
@@ -67,6 +67,7 @@ mod tests {
                 stale_index: false,
                 truncated: false,
                 palace: None,
+                git: GitStats::default(),
             },
         }
     }

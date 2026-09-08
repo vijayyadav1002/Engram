@@ -43,6 +43,7 @@ pub enum SymbolKind {
     Component,
     Heading,
     Selector,
+    Decision,
 }
 
 impl SymbolKind {
@@ -57,6 +58,7 @@ impl SymbolKind {
             SymbolKind::Component => "component",
             SymbolKind::Heading => "heading",
             SymbolKind::Selector => "selector",
+            SymbolKind::Decision => "decision",
         }
     }
 
@@ -71,6 +73,7 @@ impl SymbolKind {
             "component" => Some(SymbolKind::Component),
             "heading" => Some(SymbolKind::Heading),
             "selector" => Some(SymbolKind::Selector),
+            "decision" => Some(SymbolKind::Decision),
             _ => None,
         }
     }
@@ -80,6 +83,7 @@ impl SymbolKind {
 pub enum EdgeKind {
     Import,
     Call,
+    Supersedes,
 }
 
 impl EdgeKind {
@@ -87,6 +91,7 @@ impl EdgeKind {
         match self {
             EdgeKind::Import => "import",
             EdgeKind::Call => "call",
+            EdgeKind::Supersedes => "supersedes",
         }
     }
 
@@ -94,6 +99,7 @@ impl EdgeKind {
         match s {
             "import" => Some(EdgeKind::Import),
             "call" => Some(EdgeKind::Call),
+            "supersedes" => Some(EdgeKind::Supersedes),
             _ => None,
         }
     }
@@ -180,6 +186,24 @@ pub struct PalaceStats {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub struct GitStats {
+    pub status: String,
+    pub commits_considered: u32,
+    pub included: u32,
+}
+
+impl Default for GitStats {
+    fn default() -> Self {
+        Self {
+            status: "absent".into(),
+            commits_considered: 0,
+            included: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ContextStats {
     pub files_considered: u32,
     pub symbols_considered: u32,
@@ -189,6 +213,7 @@ pub struct ContextStats {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub palace: Option<PalaceStats>,
+    pub git: GitStats,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,9 +243,43 @@ mod tests {
             SymbolKind::Component,
             SymbolKind::Heading,
             SymbolKind::Selector,
+            SymbolKind::Decision,
         ] {
             assert_eq!(SymbolKind::from_str(k.as_str()), Some(k));
         }
+    }
+
+    #[test]
+    fn decision_and_supersedes_roundtrip() {
+        assert_eq!(SymbolKind::from_str("decision"), Some(SymbolKind::Decision));
+        assert_eq!(SymbolKind::Decision.as_str(), "decision");
+        assert_eq!(EdgeKind::from_str("supersedes"), Some(EdgeKind::Supersedes));
+        assert_eq!(EdgeKind::Supersedes.as_str(), "supersedes");
+    }
+
+    #[test]
+    fn git_stats_always_serialized() {
+        let pkg = ContextPackage {
+            query: "q".into(),
+            budget_tokens: 3000,
+            used_tokens: 0,
+            items: vec![],
+            edges: vec![],
+            stats: ContextStats {
+                files_considered: 0,
+                symbols_considered: 0,
+                dropped_for_budget: 0,
+                stale_omitted: 0,
+                stale_index: false,
+                truncated: false,
+                palace: None,
+                git: GitStats::default(),
+            },
+        };
+        let v = serde_json::to_value(&pkg).unwrap();
+        assert_eq!(v["stats"]["git"]["status"], "absent");
+        assert_eq!(v["stats"]["git"]["commits_considered"], 0);
+        assert_eq!(v["stats"]["git"]["included"], 0);
     }
 
     #[test]
@@ -247,6 +306,7 @@ mod tests {
                 stale_index: false,
                 truncated: false,
                 palace: None,
+                git: GitStats::default(),
             },
         };
         let v = serde_json::to_value(&pkg).unwrap();
@@ -271,6 +331,7 @@ mod tests {
                 stale_index: false,
                 truncated: false,
                 palace: None,
+                git: GitStats::default(),
             },
         };
         let v = serde_json::to_value(&pkg).unwrap();
@@ -298,6 +359,7 @@ mod tests {
                     included: 2,
                     dropped_for_budget: 1,
                 }),
+                git: GitStats::default(),
             },
         };
         let v = serde_json::to_value(&pkg).unwrap();

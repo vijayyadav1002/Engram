@@ -6,8 +6,8 @@ use crate::palace::{
 };
 use crate::store::{FtsHit, NeighborHit, Store, SymbolHit};
 use crate::types::{
-    Confidence, ContextEdge, ContextItem, ContextPackage, ContextStats, EdgeKind, PalaceStats,
-    SymbolKind,
+    Confidence, ContextEdge, ContextItem, ContextPackage, ContextStats, EdgeKind, GitStats,
+    PalaceStats, SymbolKind,
 };
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
@@ -242,6 +242,7 @@ pub fn get_context_with(
             stale_index: false,
             truncated: false,
             palace: None,
+            git: GitStats::default(),
         },
     };
     pkg.edges = package_edges(&pkg.items, &neighbor_edges);
@@ -479,6 +480,7 @@ fn neighbor_why(kind: EdgeKind) -> &'static str {
     match kind {
         EdgeKind::Import => "import_neighbor",
         EdgeKind::Call => "call_neighbor",
+        EdgeKind::Supersedes => "supersedes_neighbor",
     }
 }
 

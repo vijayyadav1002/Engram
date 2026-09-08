@@ -417,6 +417,7 @@ fn resolve_edge(
             }
             Ok(None)
         }
+        EdgeKind::Supersedes => Ok(None),
     }
 }
 
