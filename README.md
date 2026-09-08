@@ -260,6 +260,8 @@ engram index
 
 After the code package is compiled, Engram can append up to three **verbatim** MemPalace drawers if you opt in and `mempalace` is on `PATH`. Code spans are compiled first and keep the budget. Palace absence, timeout, or parse failure never fails `get_context`.
 
+Engram parses MemPalace **3.3.x** `search` CLI text (`[N] wing / room`, then `Source:` / `Match:`, then the indented body). There is no `search --json` flag in that release. If `stats.palace.status` is `unparseable`, the CLI format changed — file a fixture, do not grep the tree as a substitute for `get_context`.
+
 Opt in (first match that enables, unless a disable wins):
 
 1. CLI `--palace` or MCP `get_context` argument `include_palace: true`

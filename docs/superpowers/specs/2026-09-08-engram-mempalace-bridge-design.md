@@ -1,7 +1,7 @@
 # Engram–MemPalace Bridge Design
 
 Date: 2026-09-08
-Status: draft, pending user review
+Status: implemented (parser follow-up in 2026-09-08-engram-palace-cli-compat-design.md)
 Scope: optional palace attachment on Engram `get_context` (slice after Core)
 Depends on: `docs/superpowers/specs/2026-09-07-engram-core-design.md`
 
@@ -94,9 +94,9 @@ mempalace search --results <limit> <query>
 
 Working directory: Engram repo root (so a project-local palace can apply if MemPalace uses cwd). `ENGRAM_PALACE_BIN` overrides the program name. No shell; argv only. Stderr discarded except for logging to Engram stderr. Stdout is the only parse input.
 
-**Parse:** MemPalace’s CLI is human text today, not JSON. The adapter extracts each `[N] wing / room` block and the following `→` body as `text`. If parse yields nothing, treat as `Unparseable` and skip (do not fail `get_context`).
+**Parse:** MemPalace 3.3.x CLI is human text, not JSON. The adapter extracts each `[N] wing / room` block. `Source:` sets `source`. `Match:` is skipped. The body is every following non-empty line until the next header or a `─` rule line. A leading `→` on a body line is stripped if present (legacy). If parse yields nothing, treat as `Unparseable` and skip (do not fail `get_context`).
 
-If a future MemPalace `--json` flag exists, prefer that in a follow-up; do not block this slice on it.
+If a future MemPalace `--json` flag exists, prefer that in a follow-up; do not block on it.
 
 **Caps:**
 
@@ -105,7 +105,7 @@ If a future MemPalace `--json` flag exists, prefer that in a follow-up; do not b
 | `PALACE_MAX_HITS` | 3 |
 | `PALACE_ITEM_MAX_CHARS` | 1200 |
 | `PALACE_MIN_REMAINING` | 200 tokens |
-| `PALACE_TIMEOUT_MS` | 2500 |
+| `PALACE_TIMEOUT_MS` | 8000 |
 
 Truncate `text` at a character boundary; append `…` if truncated. Token cost uses the same whitespace-split estimator as Core.
 

@@ -1,7 +1,7 @@
 # Engram Core Design
 
 Date: 2026-09-07
-Status: draft, pending user review
+Status: implemented on main
 Scope: first implementation slice only
 
 ## 1. Executive summary

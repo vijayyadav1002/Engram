@@ -1,7 +1,7 @@
 # Engram Palace CLI Compat Design
 
 Date: 2026-09-08
-Status: draft, pending user review
+Status: implemented on main
 Scope: make the existing MemPalace bridge parse live CLI output and survive slow searches
 Depends on: `docs/superpowers/specs/2026-09-08-engram-mempalace-bridge-design.md`
 
