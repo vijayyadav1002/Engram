@@ -1,0 +1,19 @@
+============================================================
+  Results for: "Engram get_context"
+============================================================
+
+  [1] sessions / technical
+      Source: summary.json
+      Match:  cosine=0.686  bm25=1.644
+
+      "last_recap": "We added the README note that Engram does not store conversations."
+      }
+
+  ────────────────────────────────────────────────────────
+  [2] sessions / technical
+      Source: segment_000.md
+      Match:  cosine=0.488  bm25=0.266
+
+      ript / TSX extractor ## Task Description Read your task brief first.
+
+  ────────────────────────────────────────────────────────

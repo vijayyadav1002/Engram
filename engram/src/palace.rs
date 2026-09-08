@@ -35,7 +35,10 @@ pub fn truncate_drawer_text(text: &str) -> String {
     out
 }
 
-/// Parse `mempalace search` CLI stdout into drawers (header + optional Source + `→` body).
+/// Parse `mempalace search` CLI stdout into drawers.
+///
+/// Accepts MemPalace 3.3.x (indented body after Source/Match, no arrow)
+/// and the legacy synthetic format (body line starts with `→`).
 pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
     let mut hits = Vec::new();
     let lines: Vec<&str> = stdout.lines().collect();
@@ -45,59 +48,61 @@ pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
         if let Some((wing, room)) = parse_hit_header(trimmed) {
             i += 1;
             let mut source = String::new();
+            let mut body = String::new();
+            let mut in_body = false;
             while i < lines.len() {
-                let t = lines[i].trim_start();
-                if t.starts_with('[') && parse_hit_header(t).is_some() {
+                let next = lines[i];
+                let nt = next.trim_start();
+                if nt.starts_with('[') && parse_hit_header(nt).is_some() {
                     break;
                 }
-                if is_rule_line(t) {
+                if is_rule_line(nt) {
                     break;
                 }
-                if let Some(rest) = t.strip_prefix("Source:") {
-                    source = rest.trim().to_string();
+                if !in_body {
+                    if let Some(rest) = nt.strip_prefix("Source:") {
+                        source = rest.trim().to_string();
+                        i += 1;
+                        continue;
+                    }
+                    if nt.starts_with("Match:") {
+                        i += 1;
+                        continue;
+                    }
+                    if nt.is_empty() {
+                        i += 1;
+                        continue;
+                    }
+                    in_body = true;
+                    let start = nt
+                        .strip_prefix('→')
+                        .map(str::trim_start)
+                        .unwrap_or(nt);
+                    body.push_str(start);
                     i += 1;
                     continue;
                 }
-                if let Some(body_start) = t.strip_prefix('→') {
-                    let mut body = String::new();
-                    body.push_str(body_start.trim_start());
+                if nt.is_empty() {
                     i += 1;
-                    while i < lines.len() {
-                        let next = lines[i];
-                        let nt = next.trim_start();
-                        if nt.starts_with('[') && parse_hit_header(nt).is_some() {
-                            break;
-                        }
-                        if is_rule_line(nt) {
-                            break;
-                        }
-                        if nt.starts_with('→') {
-                            break;
-                        }
-                        // Indented continuation lines belong to the body.
-                        if next.starts_with(' ') || next.starts_with('\t') {
-                            if !body.is_empty() {
-                                body.push('\n');
-                            }
-                            body.push_str(nt);
-                            i += 1;
-                            continue;
-                        }
-                        if nt.is_empty() {
-                            i += 1;
-                            continue;
-                        }
-                        break;
-                    }
-                    hits.push(PalaceDrawer {
-                        wing,
-                        room,
-                        source,
-                        text: body,
-                    });
-                    break;
+                    continue;
                 }
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                let piece = nt
+                    .strip_prefix('→')
+                    .map(str::trim_start)
+                    .unwrap_or(nt);
+                body.push_str(piece);
                 i += 1;
+            }
+            if !body.is_empty() {
+                hits.push(PalaceDrawer {
+                    wing,
+                    room,
+                    source,
+                    text: body,
+                });
             }
             continue;
         }
@@ -386,6 +391,37 @@ mod tests {
         assert!(hits[0].text.contains("WebSockets"));
         assert_eq!(hits[1].wing, "myapp");
         assert!(hits[1].text.contains("polling"));
+    }
+
+    #[test]
+    fn parse_mempalace_3_3_5_fixture_without_arrow() {
+        let out = include_str!("../testdata/mempalace-search-3.3.5.txt");
+        assert!(
+            !out.contains('→'),
+            "fixture must be live CLI shape, not the synthetic arrow format"
+        );
+        let hits = parse_search_output(out);
+        assert!(hits.len() >= 2, "got {} hits", hits.len());
+        assert_eq!(hits[0].wing, "sessions");
+        assert_eq!(hits[0].room, "technical");
+        assert_eq!(hits[0].source, "summary.json");
+        assert!(
+            hits[0].text.contains("does not store conversations"),
+            "body was {:?}",
+            hits[0].text
+        );
+        assert!(hits[0].text.contains('}'), "JSON fragment brace is drawer text");
+        assert_eq!(hits[1].source, "segment_000.md");
+        assert!(hits[1].text.contains("TSX extractor"));
+    }
+
+    #[test]
+    fn parse_skips_match_metadata_line() {
+        let out = "  [1] w / r\n      Match:  cosine=0.1  bm25=0.0\n      body only\n";
+        let hits = parse_search_output(out);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "body only");
+        assert!(!hits[0].text.contains("cosine"));
     }
 
     #[test]
