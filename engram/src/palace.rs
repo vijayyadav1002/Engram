@@ -8,7 +8,7 @@ use std::time::Duration;
 pub const PALACE_MAX_HITS: usize = 3;
 pub const PALACE_ITEM_MAX_CHARS: usize = 1200;
 pub const PALACE_MIN_REMAINING: u32 = 200;
-pub const PALACE_TIMEOUT_MS: u64 = 2500;
+pub const PALACE_TIMEOUT_MS: u64 = 8000;
 pub const PALACE_QUERY_MAX_CHARS: usize = 250;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,6 +348,11 @@ pub fn read_config_text(root: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn palace_timeout_ms_is_eight_seconds() {
+        assert_eq!(PALACE_TIMEOUT_MS, 8000);
+    }
 
     #[test]
     fn truncate_query_caps_at_250() {
