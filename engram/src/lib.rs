@@ -2,6 +2,7 @@ pub mod compile;
 pub mod doctor;
 pub mod error;
 pub mod extract;
+pub mod git;
 pub mod hash;
 pub mod ignore;
 pub mod index;
