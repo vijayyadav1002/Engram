@@ -202,19 +202,6 @@ pub fn get_context_with(
     let (commit_spans, commit_ids, commits_considered) = collect_commits(&store, &plan)?;
     spans.extend(commit_spans);
 
-    let mut seen_symbol_ids: HashSet<i64> = accepted_ids.clone();
-    for (h, _) in &decision_hits {
-        seen_symbol_ids.insert(h.id);
-    }
-    for (h, _) in &super_cands {
-        seen_symbol_ids.insert(h.id);
-    }
-    for (h, why) in
-        collect_commit_path_symbols(&store, &commit_ids, &seen_symbol_ids, &plan.symbol_terms)?
-    {
-        spans.push(span_from_symbol(&h, why));
-    }
-
     let mut fused = fuse_spans(spans);
     let code_paths: HashSet<String> = fused
         .iter()
@@ -750,74 +737,6 @@ fn collect_commits(
         });
     }
     Ok((spans, ids, commits_considered))
-}
-
-fn collect_commit_path_symbols(
-    store: &Store,
-    commit_ids: &HashMap<String, i64>,
-    seen_symbol_ids: &HashSet<i64>,
-    terms: &[String],
-) -> Result<Vec<(SymbolHit, BTreeSet<String>)>, Error> {
-    let mut paths = BTreeSet::new();
-    for id in commit_ids.values() {
-        for p in store.commit_files(*id)? {
-            paths.insert(p);
-        }
-    }
-    let mut out = Vec::new();
-    let mut seen = seen_symbol_ids.clone();
-    for path in paths {
-        if out.len() >= CAP_SYMBOLS {
-            break;
-        }
-        let remain = CAP_SYMBOLS - out.len();
-        for h in store.lookup_symbols_in_path(&path, remain)? {
-            if !impl_symbol_kind(h.kind) {
-                continue;
-            }
-            if !seen.insert(h.id) {
-                continue;
-            }
-            let why = why_for_impl_symbol(&h, terms);
-            out.push((h, why));
-            if out.len() >= CAP_SYMBOLS {
-                break;
-            }
-        }
-    }
-    Ok(out)
-}
-
-fn impl_symbol_kind(kind: SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Function
-            | SymbolKind::Method
-            | SymbolKind::Class
-            | SymbolKind::Component
-            | SymbolKind::Interface
-            | SymbolKind::Type
-    )
-}
-
-fn why_for_impl_symbol(h: &SymbolHit, terms: &[String]) -> BTreeSet<String> {
-    if terms.iter().any(|t| h.name.eq_ignore_ascii_case(t)) {
-        return why_for_symbol(h, true);
-    }
-    if terms.iter().any(|t| name_has_prefix(&h.name, t)) {
-        return why_for_symbol(h, false);
-    }
-    let mut why = BTreeSet::new();
-    why.insert("commit".into());
-    why
-}
-
-fn name_has_prefix(name: &str, prefix: &str) -> bool {
-    if prefix.is_empty() || name.len() < prefix.len() {
-        return false;
-    }
-    name.get(..prefix.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn why_for_symbol(h: &SymbolHit, exact_first: bool) -> BTreeSet<String> {

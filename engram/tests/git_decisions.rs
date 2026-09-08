@@ -14,7 +14,7 @@ fn repo() -> PathBuf {
     fs::create_dir_all(root.join(".engram")).unwrap();
     fs::write(
         root.join("src/auth/session.ts"),
-        "export function createSession() { return 1 }\n",
+        "export function createSession() { return 1 } // WebSockets\n",
     )
     .unwrap();
     fs::write(
@@ -71,30 +71,33 @@ fn why_websockets_includes_decision_commit_and_code() {
         .items
         .iter()
         .any(|i| i.kind.as_deref() == Some("decision")));
-    assert!(pkg
-        .items
-        .iter()
-        .any(|i| { i.kind.as_deref() == Some("commit") && i.path.starts_with("git://") }));
-    assert!(pkg
-        .items
-        .iter()
-        .any(|i| i.symbol.as_deref() == Some("createSession")));
+    let sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let commit = pkg
         .items
         .iter()
         .find(|i| i.kind.as_deref() == Some("commit"))
         .unwrap();
+    assert_eq!(commit.path, format!("git://{sha}"));
+    assert_eq!(
+        commit.path.strip_prefix("git://").unwrap().chars().count(),
+        40
+    );
+    assert_eq!(commit.symbol.as_deref().map(|s| s.chars().count()), Some(7));
+    assert_eq!(commit.kind.as_deref(), Some("commit"));
     assert!(commit.why.iter().any(|w| w == "commit_path"));
     let code = pkg
         .items
         .iter()
-        .find(|i| i.symbol.as_deref() == Some("createSession"))
+        .find(|i| i.path == "src/auth/session.ts")
         .unwrap();
-    assert!(!code.why.is_empty());
-    assert!(code
-        .why
+    assert!(code.text.contains("createSession"));
+    assert!(code.why.iter().any(|w| w == "fts"));
+    assert!(!code.why.iter().any(|w| w == "commit"));
+    assert!(pkg
+        .items
         .iter()
-        .any(|w| w == "commit" || w == "exact_symbol"));
+        .filter(|i| !i.path.starts_with("git://"))
+        .all(|i| !i.why.iter().any(|w| w == "commit")));
     assert_eq!(pkg.stats.git.status, "ok");
     assert!(pkg.stats.git.commits_considered >= 1);
     let _ = fs::remove_dir_all(&root);
@@ -128,11 +131,11 @@ fn exact_symbol_outranks_weak_commit() {
 fn small_budget_can_drop_commit() {
     let root = repo();
     let pkg = get_context(&root, "why WebSockets", 400).unwrap();
-    assert!(pkg
-        .items
-        .iter()
-        .any(|i| i.symbol.as_deref() == Some("createSession")
-            || i.kind.as_deref() == Some("decision")));
+    assert!(pkg.items.iter().any(|i| {
+        i.path == "src/auth/session.ts"
+            || i.symbol.as_deref() == Some("createSession")
+            || i.kind.as_deref() == Some("decision")
+    }));
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -145,7 +148,7 @@ fn subject_hit_survives_fts_why_cap() {
     fs::create_dir_all(root.join(".engram")).unwrap();
     fs::write(
         root.join("src/auth/session.ts"),
-        "export function createSession() { return 1 }\n",
+        "export function createSession() { return 1 } // WebSockets\n",
     )
     .unwrap();
     fs::write(
