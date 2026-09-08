@@ -21,7 +21,7 @@ pub fn extract_path(rel_posix: &str, source: &str) -> Extraction {
         return ts::extract(source, ts::TsLang::Javascript);
     }
     if lower.ends_with(".md") || lower.ends_with(".mdx") {
-        return markdown::extract(source);
+        return markdown::extract(source, rel_posix);
     }
     if lower.ends_with(".css") || lower.ends_with(".scss") {
         return css::extract(source);
