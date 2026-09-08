@@ -89,6 +89,8 @@ symbols: …
 edges: …
 skipped: …
 errors: …
+commits: …
+git: ok|absent|not_installed|timeout|unparseable
 ```
 
 Re-run `engram index` after you change code. Unchanged files are skipped by content hash. To rebuild everything:
@@ -203,7 +205,7 @@ Then in the agent: “Why do we use WebSockets?” — it should hit `get_contex
 | `engram get-context "…"` | Compile an extractive package. `--json`, `--budget N` (default 3000), `--palace` (attach MemPalace drawers) |
 | `engram search-symbols NAME` | Symbol lookup |
 | `engram search-code "…"` | Keyword (FTS) lookup |
-| `engram status` | DB path, counts, last index, stale sample |
+| `engram status` | DB path, schema, file/symbol/commit counts, `git_head`, last index, stale sample |
 | `engram doctor` | Binary, grammars, DB, ignore files, harness config |
 | `engram mcp` | Stdio MCP server (used by agents; you rarely run this yourself) |
 
@@ -248,8 +250,8 @@ The default integration is two MCP servers plus a router. `engram init --skill -
 | Question | First tool |
 |---|---|
 | Where / how is this implemented? | Engram `get_context` |
-| What did we decide? Last session? Who? | MemPalace `mempalace_search` |
-| Why did we choose X? | `get_context` with `include_palace: true`. **Code wins** if they disagree. |
+| What did we decide in chat? Last session? Who? | MemPalace `mempalace_search` |
+| Why did we choose X? | `get_context` (commit messages and ADRs may already be in the package). Add `include_palace: true` for **conversation** memory. **Code wins** if they disagree. |
 
 ```bash
 # in your app
