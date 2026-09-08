@@ -1,10 +1,11 @@
 use crate::error::Error;
+use crate::git::{COMMIT_FTS_CAP, DECISION_SYMBOL_CAP, SUPERSEDES_NEIGHBOR_CAP};
 use crate::hash::blake3_file;
 use crate::palace::{
     default_bin, read_config_text, resolve_opt_in, truncate_drawer_text, CliPalaceSearch,
     PalaceError, PalaceSearch, PALACE_MAX_HITS, PALACE_MIN_REMAINING, PALACE_TIMEOUT_MS,
 };
-use crate::store::{FtsHit, NeighborHit, Store, SymbolHit};
+use crate::store::{CommitHit, FtsHit, NeighborHit, Store, SymbolHit};
 use crate::types::{
     Confidence, ContextEdge, ContextItem, ContextPackage, ContextStats, EdgeKind, GitStats,
     PalaceStats, SymbolKind,
@@ -106,7 +107,7 @@ pub fn get_context_with(
     let accepted_ids: HashSet<i64> = by_id.keys().copied().collect();
 
     let fts_hits = collect_fts(&store, &plan)?;
-    let (neighbor_cands, neighbor_edges) = collect_neighbors(&store, &symbol_hits, &mut by_id)?;
+    let (neighbor_cands, mut neighbor_edges) = collect_neighbors(&store, &symbol_hits, &mut by_id)?;
 
     let mut terms_for_heading = plan.symbol_terms.clone();
     for w in plan.fts_query.split_whitespace() {
@@ -156,11 +157,74 @@ pub fn get_context_with(
                 neighbor_high: false,
                 neighbor_low: false,
                 score: 0.0,
+                prequoted: None,
             });
         }
     }
 
+    let extra_decision_names: Vec<String> = spans
+        .iter()
+        .filter(|s| s.kind.as_deref() == Some("heading"))
+        .filter_map(|s| s.symbol.clone())
+        .collect();
+    let fts_paths: HashSet<String> = fts_hits.iter().map(|h| h.path.clone()).collect();
+    let decision_hits = collect_decisions(
+        &store,
+        &plan.symbol_terms,
+        &extra_decision_names,
+        &fts_paths,
+        DECISION_SYMBOL_CAP,
+    )?;
+    for (h, exact) in &decision_hits {
+        let mut why = why_for_symbol(h, *exact);
+        why.insert("decision".into());
+        spans.push(span_from_symbol(h, why));
+        by_id.insert(h.id, h.clone());
+    }
+    let (super_cands, super_edges) =
+        collect_supersedes_neighbors(&store, &decision_hits, &mut by_id)?;
+    for (h, n) in &super_cands {
+        let mut why = BTreeSet::new();
+        why.insert("decision".into());
+        why.insert("supersedes_neighbor".into());
+        let mut span = span_from_symbol(h, why);
+        span.neighbor_high = n.confidence == Confidence::High;
+        span.neighbor_low = n.confidence == Confidence::Low;
+        spans.push(span);
+    }
+    neighbor_edges.extend(super_edges);
+
+    let (commit_spans, commit_ids, commits_considered) = collect_commits(&store, &plan)?;
+    spans.extend(commit_spans);
+
     let mut fused = fuse_spans(spans);
+    let code_paths: HashSet<String> = fused
+        .iter()
+        .filter(|s| !s.path.starts_with("git://"))
+        .map(|s| s.path.clone())
+        .collect();
+    for s in &mut fused {
+        if let Some(sha) = s.path.strip_prefix("git://") {
+            if let Some(&id) = commit_ids.get(sha) {
+                let files = store.commit_files(id)?;
+                if files.iter().any(|f| {
+                    plan.path_hints.iter().any(|h| f.contains(h.as_str())) || code_paths.contains(f)
+                }) {
+                    s.why.insert("commit_path".into());
+                }
+            }
+        }
+    }
+    let mut seen_symbol_ids: HashSet<i64> = accepted_ids.clone();
+    for (h, _) in &decision_hits {
+        seen_symbol_ids.insert(h.id);
+    }
+    for (h, _) in &super_cands {
+        seen_symbol_ids.insert(h.id);
+    }
+    for h in collect_commit_path_symbols(&store, &commit_ids, &seen_symbol_ids)? {
+        fused.push(span_from_symbol(&h, BTreeSet::new()));
+    }
     let top_files: HashSet<String> = fused
         .iter()
         .filter(|s| s.why.contains("exact_symbol"))
@@ -249,6 +313,21 @@ pub fn get_context_with(
     pkg.stats.stale_index = stale_index_flag(pkg.stats.stale_omitted, pkg.items.len());
 
     enforce_json_cap(&mut pkg, &neighbor_edges);
+    let included = pkg
+        .items
+        .iter()
+        .filter(|i| i.kind.as_deref() == Some("commit"))
+        .count() as u32;
+    let status = if store.meta()?.commit_count > 0 {
+        "ok"
+    } else {
+        "absent"
+    };
+    pkg.stats.git = GitStats {
+        status: status.into(),
+        commits_considered,
+        included,
+    };
     attach_palace(&mut pkg, root, query, budget_tokens, &opts, &neighbor_edges);
     Ok(pkg)
 }
@@ -265,6 +344,7 @@ struct SpanCand {
     neighbor_high: bool,
     neighbor_low: bool,
     score: f64,
+    prequoted: Option<String>,
 }
 
 fn extract_quoted(query: &str) -> (Vec<String>, String) {
@@ -484,6 +564,232 @@ fn neighbor_why(kind: EdgeKind) -> &'static str {
     }
 }
 
+fn collect_decisions(
+    store: &Store,
+    terms: &[String],
+    extra_names: &[String],
+    fts_paths: &HashSet<String>,
+    cap: usize,
+) -> Result<Vec<(SymbolHit, bool)>, Error> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    if cap == 0 {
+        return Ok(out);
+    }
+    for term in terms {
+        if out.len() >= cap {
+            break;
+        }
+        let remain = cap - out.len();
+        for h in store.lookup_symbols_kind_exact(term, SymbolKind::Decision, remain)? {
+            if seen.insert(h.id) {
+                out.push((h, true));
+                if out.len() >= cap {
+                    return Ok(out);
+                }
+            }
+        }
+        let remain = cap - out.len();
+        for h in store.lookup_symbols_kind_prefix(term, SymbolKind::Decision, remain)? {
+            if seen.insert(h.id) {
+                out.push((h, false));
+                if out.len() >= cap {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    for name in extra_names {
+        if out.len() >= cap {
+            break;
+        }
+        let remain = cap - out.len();
+        for h in store.lookup_symbols_kind_exact(name, SymbolKind::Decision, remain)? {
+            if seen.insert(h.id) {
+                out.push((h, true));
+                if out.len() >= cap {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    if out.len() < cap && (!terms.is_empty() || !fts_paths.is_empty()) {
+        let remain = cap - out.len();
+        for h in store.lookup_symbols_kind_prefix("", SymbolKind::Decision, remain + out.len())? {
+            if seen.contains(&h.id) {
+                continue;
+            }
+            if name_matches(&h.name, terms) || fts_paths.contains(&h.path) {
+                seen.insert(h.id);
+                out.push((h, false));
+                if out.len() >= cap {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn collect_supersedes_neighbors(
+    store: &Store,
+    decisions: &[(SymbolHit, bool)],
+    by_id: &mut HashMap<i64, SymbolHit>,
+) -> Result<(Vec<(SymbolHit, NeighborHit)>, Vec<NeighborHit>), Error> {
+    let mut edges = Vec::new();
+    let mut high: Vec<NeighborHit> = Vec::new();
+    let mut low: Vec<NeighborHit> = Vec::new();
+    let accepted_ids: HashSet<i64> = decisions.iter().map(|(h, _)| h.id).collect();
+
+    for (h, _) in decisions {
+        for n in store.neighbors(h.id, SUPERSEDES_NEIGHBOR_CAP)? {
+            if n.kind != EdgeKind::Supersedes {
+                continue;
+            }
+            edges.push(n.clone());
+            match n.confidence {
+                Confidence::High => high.push(n),
+                Confidence::Low => low.push(n),
+            }
+        }
+    }
+
+    let mut cands = Vec::new();
+    let mut taken = HashSet::new();
+    for n in high.into_iter().chain(low) {
+        if taken.len() >= SUPERSEDES_NEIGHBOR_CAP {
+            break;
+        }
+        let other_id = if accepted_ids.contains(&n.src_id) && !accepted_ids.contains(&n.dst_id) {
+            n.dst_id
+        } else if accepted_ids.contains(&n.dst_id) && !accepted_ids.contains(&n.src_id) {
+            n.src_id
+        } else {
+            continue;
+        };
+        if !taken.insert(other_id) {
+            continue;
+        }
+        let hit = match resolve_neighbor(store, by_id, other_id, &n)? {
+            Some(h) => h,
+            None => {
+                taken.remove(&other_id);
+                continue;
+            }
+        };
+        by_id.insert(hit.id, hit.clone());
+        cands.push((hit, n));
+    }
+    Ok((cands, edges))
+}
+
+fn collect_commits(
+    store: &Store,
+    plan: &QueryPlan,
+) -> Result<(Vec<SpanCand>, HashMap<String, i64>, u32), Error> {
+    let mut seen = HashSet::new();
+    let mut ordered: Vec<(CommitHit, f64)> = Vec::new();
+    if !plan.fts_query.is_empty() {
+        let hits = match store.search_commits_fts(&plan.fts_query, COMMIT_FTS_CAP) {
+            Ok(v) => v,
+            Err(_) => vec![],
+        };
+        for (idx, (hit, _)) in hits.into_iter().enumerate() {
+            if ordered.len() >= COMMIT_FTS_CAP {
+                break;
+            }
+            if seen.insert(hit.sha.clone()) {
+                let fts_norm = 1.0 / (1.0 + idx as f64);
+                ordered.push((hit, fts_norm));
+            }
+        }
+    }
+    let subject = match store.search_commits_subject(&plan.symbol_terms, COMMIT_FTS_CAP) {
+        Ok(v) => v,
+        Err(_) => vec![],
+    };
+    for hit in subject {
+        if ordered.len() >= COMMIT_FTS_CAP {
+            break;
+        }
+        if seen.insert(hit.sha.clone()) {
+            ordered.push((hit, 1.0));
+        }
+    }
+    let commits_considered = ordered.len() as u32;
+    let mut ids = HashMap::new();
+    let mut spans = Vec::new();
+    for (hit, fts_norm) in ordered {
+        ids.insert(hit.sha.clone(), hit.id);
+        let mut why = BTreeSet::new();
+        why.insert("commit".into());
+        why.insert("commit_fts".into());
+        let prequoted = if hit.body.is_empty() {
+            hit.subject.clone()
+        } else {
+            format!("{}\n\n{}", hit.subject, hit.body)
+        };
+        spans.push(SpanCand {
+            path: format!("git://{}", hit.sha),
+            start_line: 1,
+            end_line: 1,
+            symbol: Some(hit.sha.chars().take(7).collect()),
+            kind: Some("commit".into()),
+            why,
+            fts_norm,
+            neighbor_high: false,
+            neighbor_low: false,
+            score: 0.0,
+            prequoted: Some(prequoted),
+        });
+    }
+    Ok((spans, ids, commits_considered))
+}
+
+fn collect_commit_path_symbols(
+    store: &Store,
+    commit_ids: &HashMap<String, i64>,
+    seen_symbol_ids: &HashSet<i64>,
+) -> Result<Vec<SymbolHit>, Error> {
+    let mut paths = HashSet::new();
+    for id in commit_ids.values() {
+        for p in store.commit_files(*id)? {
+            paths.insert(p);
+        }
+    }
+    if paths.is_empty() {
+        return Ok(vec![]);
+    }
+    let kinds = [
+        SymbolKind::Function,
+        SymbolKind::Method,
+        SymbolKind::Class,
+        SymbolKind::Component,
+        SymbolKind::Interface,
+        SymbolKind::Type,
+    ];
+    let mut out = Vec::new();
+    let mut seen = seen_symbol_ids.clone();
+    for kind in kinds {
+        if out.len() >= CAP_SYMBOLS {
+            break;
+        }
+        for h in store.lookup_symbols_kind_prefix("", kind, CAP_SYMBOLS)? {
+            if !paths.contains(&h.path) {
+                continue;
+            }
+            if !seen.insert(h.id) {
+                continue;
+            }
+            out.push(h);
+            if out.len() >= CAP_SYMBOLS {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn why_for_symbol(h: &SymbolHit, exact_first: bool) -> BTreeSet<String> {
     let mut why = BTreeSet::new();
     if exact_first {
@@ -496,6 +802,9 @@ fn why_for_symbol(h: &SymbolHit, exact_first: bool) -> BTreeSet<String> {
     }
     if h.kind == SymbolKind::Selector {
         why.insert("selector".into());
+    }
+    if h.kind == SymbolKind::Decision {
+        why.insert("decision".into());
     }
     why
 }
@@ -512,6 +821,7 @@ fn span_from_symbol(h: &SymbolHit, why: BTreeSet<String>) -> SpanCand {
         neighbor_high: false,
         neighbor_low: false,
         score: 0.0,
+        prequoted: None,
     }
 }
 
@@ -565,6 +875,9 @@ fn fuse_into(dst: &mut SpanCand, src: SpanCand) {
     dst.fts_norm = dst.fts_norm.max(src.fts_norm);
     dst.neighbor_high |= src.neighbor_high;
     dst.neighbor_low |= src.neighbor_low;
+    if dst.prequoted.is_none() {
+        dst.prequoted = src.prequoted;
+    }
 }
 
 fn rescore(span: &mut SpanCand, path_hints: &[String], top_files: &HashSet<String>) {
@@ -593,6 +906,12 @@ fn rescore(span: &mut SpanCand, path_hints: &[String], top_files: &HashSet<Strin
         score += 1.0;
     }
     if top_files.contains(&span.path) {
+        score += 1.0;
+    }
+    if span.why.contains("commit_fts") {
+        score += 2.0 * span.fts_norm;
+    }
+    if span.why.contains("commit_path") {
         score += 1.0;
     }
     span.score = score;
@@ -669,6 +988,27 @@ fn fill_items(
     fresh_cache: &mut HashMap<String, bool>,
 ) -> Result<bool, Error> {
     for s in spans {
+        if s.path.starts_with("git://") {
+            let Some(text) = s.prequoted.as_ref().filter(|t| !t.is_empty()).cloned() else {
+                continue;
+            };
+            let cost = token_cost(&text);
+            if *used_tokens + cost > budget_tokens {
+                *dropped_for_budget += 1;
+                return Ok(true);
+            }
+            *used_tokens += cost;
+            items.push(ContextItem {
+                path: s.path.clone(),
+                start_line: s.start_line,
+                end_line: s.end_line,
+                symbol: s.symbol.clone(),
+                kind: s.kind.clone(),
+                text,
+                why: s.why.iter().cloned().collect(),
+            });
+            continue;
+        }
         if !file_is_fresh(store, root, &s.path, fresh_cache)? {
             *stale_omitted += 1;
             continue;
