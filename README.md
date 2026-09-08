@@ -109,6 +109,12 @@ That prints a budgeted digest of quoted source. JSON:
 engram get-context "where is authentication handled?" --json --budget 3000
 ```
 
+To also attach up to three [MemPalace](https://github.com/MemPalace/mempalace) drawers in the same package (off by default):
+
+```bash
+engram get-context "why did we choose WebSockets?" --palace
+```
+
 Debug hatches (not the default agent path):
 
 ```bash
@@ -192,7 +198,7 @@ Then in the agent: “Why do we use WebSockets?” — it should hit `get_contex
 |---|---|
 | `engram init` | Create `.engram/`, ignore files. Optional `--harness`, `--skill`, `--write-agents` |
 | `engram index` | Incremental index. `--force` rebuilds |
-| `engram get-context "…"` | Compile an extractive package. `--json`, `--budget N` (default 3000), `--palace` |
+| `engram get-context "…"` | Compile an extractive package. `--json`, `--budget N` (default 3000), `--palace` (attach MemPalace drawers) |
 | `engram search-symbols NAME` | Symbol lookup |
 | `engram search-code "…"` | Keyword (FTS) lookup |
 | `engram status` | DB path, counts, last index, stale sample |
@@ -231,15 +237,17 @@ This crate is mostly Rust, so the **graph** will look small (TypeScript/Python f
 
 ## Alongside MemPalace
 
-Engram is the **current repo**. MemPalace is **what you already said and decided**. Configure both MCP servers in the same project. Do not mine the source tree into the palace as a substitute for `engram index`.
+Engram is the **current repo**. MemPalace is **what you already said and decided**. Use both. Do not mine the source tree into the palace as a substitute for `engram index`, and do not dump palace wake-ups into the prompt as a substitute for `get_context`.
 
-Router (also in `AGENTS.md` and `.grok/skills/engram/SKILL.md`):
+Engram does **not** store conversations. For Grok, a user-level Stop/SessionEnd hook (`~/.grok/hooks/mempalace-grok.json`) can write MemPalace diaries; `engram init` does not install it.
+
+The default integration is two MCP servers plus a router. `engram init --skill --write-agents` writes that router into `AGENTS.md` and `.grok/skills/engram/SKILL.md`.
 
 | Question | First tool |
 |---|---|
 | Where / how is this implemented? | Engram `get_context` |
 | What did we decide? Last session? Who? | MemPalace `mempalace_search` |
-| Why did we choose X? | `get_context`, then palace search. **Code wins** if they disagree. |
+| Why did we choose X? | `get_context` with `include_palace: true`. **Code wins** if they disagree. |
 
 ```bash
 # in your app
@@ -248,7 +256,43 @@ engram index
 # MemPalace MCP should already be in Grok/Claude/Cursor config
 ```
 
-Optional next slice: `get_context` can attach up to three palace drawers in the same package (off by default). Spec: `docs/superpowers/specs/2026-09-08-engram-mempalace-bridge-design.md`.
+### Optional: attach drawers on `get_context`
+
+After the code package is compiled, Engram can append up to three **verbatim** MemPalace drawers if you opt in and `mempalace` is on `PATH`. Code spans are compiled first and keep the budget. Palace absence, timeout, or parse failure never fails `get_context`.
+
+Opt in (first match that enables, unless a disable wins):
+
+1. CLI `--palace` or MCP `get_context` argument `include_palace: true`
+2. Env `ENGRAM_PALACE=1` (also `true` / `yes`)
+3. File `.engram/config.toml` with `palace = true`
+
+Disable always wins: `include_palace: false` or `ENGRAM_PALACE=0` (`false` / `no`) even if the config file says `true`.
+
+```bash
+engram get-context "why did we choose WebSockets?" --palace --json
+```
+
+On MCP, pass `"include_palace": true` on the `get_context` tool call. The Engram server config is unchanged.
+
+Always-on for this repo (do not commit `.engram/`):
+
+```toml
+# .engram/config.toml
+palace = true
+```
+
+Palace items look like this in the package:
+
+| Field | Value |
+|---|---|
+| `path` | `palace://{wing}/{room}` |
+| `kind` | `"palace"` |
+| `why` | `["palace"]` |
+| `text` | verbatim drawer (truncated at 1200 characters, never summarized) |
+
+`stats.palace` is omitted when attachment is off. When it ran you get `status` (`ok`, `not_installed`, `timeout`, `unparseable`), plus `attempted` / `included` / `dropped_for_budget`.
+
+Override the binary with `ENGRAM_PALACE_BIN=/path/to/mempalace` if it is not on `PATH`. If `mempalace` is not installed, the code package still returns.
 
 ## Privacy
 

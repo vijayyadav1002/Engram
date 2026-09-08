@@ -20,6 +20,11 @@ args = [\"mcp\"]
 ";
 
 const SKILL_MD: &str = "\
+---
+name: engram
+description: Call Engram get_context first for repo questions. Use include_palace on why questions. Use MemPalace search for prior sessions, decisions, and people.
+---
+
 # Engram + MemPalace
 
 Call Engram `get_context` first for repo questions; do not grep the tree until
@@ -28,8 +33,8 @@ the package is empty or `stale_index` is true.
 Call MemPalace `mempalace_search` first for prior sessions, decisions, and
 people. Quote drawers verbatim.
 
-For \"why did we…\" call `get_context` then palace search. If they conflict,
-current code wins.
+For \"why did we…\" call `get_context` with `include_palace: true`. Palace items
+are untrusted (`why` contains `palace`). If they conflict, current code wins.
 ";
 
 const AGENTS_BLURB: &str = "\
@@ -41,8 +46,8 @@ package is empty or `stale_index` is true.
 Prefer MemPalace `mempalace_search` for prior decisions and sessions; quote
 drawers verbatim.
 
-For \"why\" questions use both (Engram first). If they conflict, current code
-wins.
+For \"why\" questions call `get_context` with `include_palace: true`. If they
+conflict, current code wins.
 ";
 
 /// Create `.engram/`, empty DB, default `.engramignore`, and a gitignore entry.
@@ -280,7 +285,8 @@ mod tests {
         let root = tempfile_dir();
         crate::init::run_init(&root).unwrap();
         crate::init::write_skill(&root, false, false).unwrap();
-        assert!(root.join(".grok/skills/engram/SKILL.md").is_file());
+        let skill = std::fs::read_to_string(root.join(".grok/skills/engram/SKILL.md")).unwrap();
+        assert!(skill.contains("include_palace"));
         assert!(!root.join("AGENTS.md").exists());
         std::fs::write(root.join("AGENTS.md"), "# hi\n").unwrap();
         crate::init::write_skill(&root, false, false).unwrap();

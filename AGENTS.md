@@ -16,7 +16,7 @@ The goal is a small, accurate answer:
 |---|---|---|
 | Where / how is this implemented? What does this file/symbol do? | Engram `get_context` | Grep or read files only if `items` is empty or `stats.stale_index` is true (then `engram index` / tell the user). |
 | What did we decide? What happened last session? Who is X? | MemPalace `mempalace_search` (KG tools for people/projects/facts) | Quote drawers verbatim. Do not paraphrase palace text. |
-| Why did we choose X? Why this architecture? | Engram `get_context`, **then** `mempalace_search` | Code is what ships. Palace is the discussion. If they conflict, say the **code has moved on** and cite both. |
+| Why did we choose X? Why this architecture? | Engram `get_context` with `include_palace: true` | Code is what ships. Palace items (`why` contains `palace`) are the discussion. If they conflict, say the **code has moved on** and cite both. Use `mempalace_search` if you need more than the attached drawers. |
 
 ## Engram rules
 
