@@ -162,17 +162,22 @@ pub fn get_context_with(
         }
     }
 
-    let extra_decision_names: Vec<String> = spans
+    let mut extra_decision_names: Vec<String> = spans
         .iter()
         .filter(|s| s.kind.as_deref() == Some("heading"))
         .filter_map(|s| s.symbol.clone())
         .collect();
-    let fts_paths: HashSet<String> = fts_hits.iter().map(|h| h.path.clone()).collect();
+    for hit in &fts_hits {
+        for h in store.lookup_symbols_in_path(&hit.path, CAP_SYMBOLS)? {
+            if h.kind == SymbolKind::Heading && name_matches(&h.name, &terms_for_heading) {
+                push_unique(&mut extra_decision_names, h.name);
+            }
+        }
+    }
     let decision_hits = collect_decisions(
         &store,
         &plan.symbol_terms,
         &extra_decision_names,
-        &fts_paths,
         DECISION_SYMBOL_CAP,
     )?;
     for (h, exact) in &decision_hits {
@@ -197,6 +202,19 @@ pub fn get_context_with(
     let (commit_spans, commit_ids, commits_considered) = collect_commits(&store, &plan)?;
     spans.extend(commit_spans);
 
+    let mut seen_symbol_ids: HashSet<i64> = accepted_ids.clone();
+    for (h, _) in &decision_hits {
+        seen_symbol_ids.insert(h.id);
+    }
+    for (h, _) in &super_cands {
+        seen_symbol_ids.insert(h.id);
+    }
+    for (h, why) in
+        collect_commit_path_symbols(&store, &commit_ids, &seen_symbol_ids, &plan.symbol_terms)?
+    {
+        spans.push(span_from_symbol(&h, why));
+    }
+
     let mut fused = fuse_spans(spans);
     let code_paths: HashSet<String> = fused
         .iter()
@@ -214,16 +232,6 @@ pub fn get_context_with(
                 }
             }
         }
-    }
-    let mut seen_symbol_ids: HashSet<i64> = accepted_ids.clone();
-    for (h, _) in &decision_hits {
-        seen_symbol_ids.insert(h.id);
-    }
-    for (h, _) in &super_cands {
-        seen_symbol_ids.insert(h.id);
-    }
-    for h in collect_commit_path_symbols(&store, &commit_ids, &seen_symbol_ids)? {
-        fused.push(span_from_symbol(&h, BTreeSet::new()));
     }
     let top_files: HashSet<String> = fused
         .iter()
@@ -568,7 +576,6 @@ fn collect_decisions(
     store: &Store,
     terms: &[String],
     extra_names: &[String],
-    fts_paths: &HashSet<String>,
     cap: usize,
 ) -> Result<Vec<(SymbolHit, bool)>, Error> {
     let mut out = Vec::new();
@@ -579,6 +586,9 @@ fn collect_decisions(
     for term in terms {
         if out.len() >= cap {
             break;
+        }
+        if term.is_empty() {
+            continue;
         }
         let remain = cap - out.len();
         for h in store.lookup_symbols_kind_exact(term, SymbolKind::Decision, remain)? {
@@ -603,27 +613,15 @@ fn collect_decisions(
         if out.len() >= cap {
             break;
         }
+        if name.is_empty() {
+            continue;
+        }
         let remain = cap - out.len();
         for h in store.lookup_symbols_kind_exact(name, SymbolKind::Decision, remain)? {
             if seen.insert(h.id) {
                 out.push((h, true));
                 if out.len() >= cap {
                     return Ok(out);
-                }
-            }
-        }
-    }
-    if out.len() < cap && (!terms.is_empty() || !fts_paths.is_empty()) {
-        let remain = cap - out.len();
-        for h in store.lookup_symbols_kind_prefix("", SymbolKind::Decision, remain + out.len())? {
-            if seen.contains(&h.id) {
-                continue;
-            }
-            if name_matches(&h.name, terms) || fts_paths.contains(&h.path) {
-                seen.insert(h.id);
-                out.push((h, false));
-                if out.len() >= cap {
-                    break;
                 }
             }
         }
@@ -687,33 +685,41 @@ fn collect_commits(
     store: &Store,
     plan: &QueryPlan,
 ) -> Result<(Vec<SpanCand>, HashMap<String, i64>, u32), Error> {
-    let mut seen = HashSet::new();
-    let mut ordered: Vec<(CommitHit, f64)> = Vec::new();
-    if !plan.fts_query.is_empty() {
-        let hits = match store.search_commits_fts(&plan.fts_query, COMMIT_FTS_CAP) {
+    let fts_hits = if plan.fts_query.is_empty() {
+        vec![]
+    } else {
+        match store.search_commits_fts(&plan.fts_query, COMMIT_FTS_CAP) {
             Ok(v) => v,
             Err(_) => vec![],
-        };
-        for (idx, (hit, _)) in hits.into_iter().enumerate() {
-            if ordered.len() >= COMMIT_FTS_CAP {
-                break;
-            }
-            if seen.insert(hit.sha.clone()) {
-                let fts_norm = 1.0 / (1.0 + idx as f64);
-                ordered.push((hit, fts_norm));
-            }
         }
-    }
+    };
     let subject = match store.search_commits_subject(&plan.symbol_terms, COMMIT_FTS_CAP) {
         Ok(v) => v,
         Err(_) => vec![],
     };
+    let mut fts_norm_by_sha: HashMap<String, f64> = HashMap::new();
+    for (idx, (hit, _)) in fts_hits.iter().enumerate() {
+        fts_norm_by_sha
+            .entry(hit.sha.clone())
+            .or_insert(1.0 / (1.0 + idx as f64));
+    }
+    let mut seen = HashSet::new();
+    let mut ordered: Vec<(CommitHit, f64)> = Vec::new();
     for hit in subject {
         if ordered.len() >= COMMIT_FTS_CAP {
             break;
         }
         if seen.insert(hit.sha.clone()) {
-            ordered.push((hit, 1.0));
+            let fts_norm = fts_norm_by_sha.get(&hit.sha).copied().unwrap_or(1.0);
+            ordered.push((hit, fts_norm));
+        }
+    }
+    for (idx, (hit, _)) in fts_hits.into_iter().enumerate() {
+        if ordered.len() >= COMMIT_FTS_CAP {
+            break;
+        }
+        if seen.insert(hit.sha.clone()) {
+            ordered.push((hit, 1.0 / (1.0 + idx as f64)));
         }
     }
     let commits_considered = ordered.len() as u32;
@@ -750,44 +756,68 @@ fn collect_commit_path_symbols(
     store: &Store,
     commit_ids: &HashMap<String, i64>,
     seen_symbol_ids: &HashSet<i64>,
-) -> Result<Vec<SymbolHit>, Error> {
-    let mut paths = HashSet::new();
+    terms: &[String],
+) -> Result<Vec<(SymbolHit, BTreeSet<String>)>, Error> {
+    let mut paths = BTreeSet::new();
     for id in commit_ids.values() {
         for p in store.commit_files(*id)? {
             paths.insert(p);
         }
     }
-    if paths.is_empty() {
-        return Ok(vec![]);
-    }
-    let kinds = [
-        SymbolKind::Function,
-        SymbolKind::Method,
-        SymbolKind::Class,
-        SymbolKind::Component,
-        SymbolKind::Interface,
-        SymbolKind::Type,
-    ];
     let mut out = Vec::new();
     let mut seen = seen_symbol_ids.clone();
-    for kind in kinds {
+    for path in paths {
         if out.len() >= CAP_SYMBOLS {
             break;
         }
-        for h in store.lookup_symbols_kind_prefix("", kind, CAP_SYMBOLS)? {
-            if !paths.contains(&h.path) {
+        let remain = CAP_SYMBOLS - out.len();
+        for h in store.lookup_symbols_in_path(&path, remain)? {
+            if !impl_symbol_kind(h.kind) {
                 continue;
             }
             if !seen.insert(h.id) {
                 continue;
             }
-            out.push(h);
+            let why = why_for_impl_symbol(&h, terms);
+            out.push((h, why));
             if out.len() >= CAP_SYMBOLS {
                 break;
             }
         }
     }
     Ok(out)
+}
+
+fn impl_symbol_kind(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function
+            | SymbolKind::Method
+            | SymbolKind::Class
+            | SymbolKind::Component
+            | SymbolKind::Interface
+            | SymbolKind::Type
+    )
+}
+
+fn why_for_impl_symbol(h: &SymbolHit, terms: &[String]) -> BTreeSet<String> {
+    if terms.iter().any(|t| h.name.eq_ignore_ascii_case(t)) {
+        return why_for_symbol(h, true);
+    }
+    if terms.iter().any(|t| name_has_prefix(&h.name, t)) {
+        return why_for_symbol(h, false);
+    }
+    let mut why = BTreeSet::new();
+    why.insert("commit".into());
+    why
+}
+
+fn name_has_prefix(name: &str, prefix: &str) -> bool {
+    if prefix.is_empty() || name.len() < prefix.len() {
+        return false;
+    }
+    name.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn why_for_symbol(h: &SymbolHit, exact_first: bool) -> BTreeSet<String> {

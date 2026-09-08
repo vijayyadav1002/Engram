@@ -79,6 +79,22 @@ fn why_websockets_includes_decision_commit_and_code() {
         .items
         .iter()
         .any(|i| i.symbol.as_deref() == Some("createSession")));
+    let commit = pkg
+        .items
+        .iter()
+        .find(|i| i.kind.as_deref() == Some("commit"))
+        .unwrap();
+    assert!(commit.why.iter().any(|w| w == "commit_path"));
+    let code = pkg
+        .items
+        .iter()
+        .find(|i| i.symbol.as_deref() == Some("createSession"))
+        .unwrap();
+    assert!(!code.why.is_empty());
+    assert!(code
+        .why
+        .iter()
+        .any(|w| w == "commit" || w == "exact_symbol"));
     assert_eq!(pkg.stats.git.status, "ok");
     assert!(pkg.stats.git.commits_considered >= 1);
     let _ = fs::remove_dir_all(&root);
@@ -117,6 +133,68 @@ fn small_budget_can_drop_commit() {
         .iter()
         .any(|i| i.symbol.as_deref() == Some("createSession")
             || i.kind.as_deref() == Some("decision")));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn subject_hit_survives_fts_why_cap() {
+    let root = std::env::temp_dir().join(format!("engram-git-dec-cap-{}", unique_name()));
+    fs::create_dir_all(root.join("src/auth")).unwrap();
+    fs::create_dir_all(root.join("docs/adr")).unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    fs::create_dir_all(root.join(".engram")).unwrap();
+    fs::write(
+        root.join("src/auth/session.ts"),
+        "export function createSession() { return 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/adr/007-websockets.md"),
+        "# Use WebSockets\n\n## Decision\n\nUse WebSockets instead of polling.\n",
+    )
+    .unwrap();
+    Store::create(&root.join(".engram/index.sqlite"), root.to_str().unwrap()).unwrap();
+    let ws_sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut commits: Vec<GitCommit> = (0..20)
+        .map(|i| GitCommit {
+            sha: format!("{:040x}", i + 1),
+            author: "Ada".into(),
+            authored_at: "2026-01-01T00:00:00Z".into(),
+            subject: format!("why change {i}"),
+            body: String::new(),
+            files: vec!["src/auth/session.ts".into()],
+        })
+        .collect();
+    commits.push(GitCommit {
+        sha: ws_sha.into(),
+        author: "Ada".into(),
+        authored_at: "2026-01-02T00:00:00Z".into(),
+        subject: "use websockets".into(),
+        body: "replace polling".into(),
+        files: vec!["src/auth/session.ts".into()],
+    });
+    let fake = FakeGitSource {
+        head: ws_sha.into(),
+        ancestor: false,
+        commits,
+        head_err: None,
+        log_err: None,
+    };
+    index_repo_with(
+        &root,
+        true,
+        IndexOpts {
+            git: Some(Arc::new(fake)),
+        },
+    )
+    .unwrap();
+    let pkg = get_context(&root, "why WebSockets", 3000).unwrap();
+    assert!(
+        pkg.items
+            .iter()
+            .any(|i| i.path == format!("git://{ws_sha}")),
+        "subject-term commit must survive when FTS remainder fills the cap"
+    );
     let _ = fs::remove_dir_all(&root);
 }
 

@@ -226,7 +226,9 @@ impl Store {
             return Ok(());
         }
         self.conn.execute_batch(COMMIT_DDL).map_err(map_db)?;
-        let _ = self.conn.execute("ALTER TABLE meta ADD COLUMN git_head TEXT", []);
+        let _ = self
+            .conn
+            .execute("ALTER TABLE meta ADD COLUMN git_head TEXT", []);
         let _ = self.conn.execute(
             "ALTER TABLE meta ADD COLUMN commit_count INTEGER NOT NULL DEFAULT 0",
             [],
@@ -472,6 +474,34 @@ impl Store {
                         params![pattern, kind.as_str(), limit as i64],
                         map_symbol_hit,
                     )
+                    .map_err(map_db)?;
+                collect_hits(rows)
+            }
+            Err(_) => Ok(vec![]),
+        }
+    }
+
+    pub fn lookup_symbols_in_path(
+        &self,
+        path: &str,
+        limit: usize,
+    ) -> Result<Vec<SymbolHit>, Error> {
+        if limit == 0 {
+            return Ok(vec![]);
+        }
+        let stmt = self.conn.prepare(
+            "SELECT s.id, s.file_id, f.path, s.name, s.kind,
+                    s.start_line, s.end_line, s.start_byte, s.end_byte, s.signature
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             WHERE f.path = ?1
+             ORDER BY s.start_line, s.id
+             LIMIT ?2",
+        );
+        match stmt {
+            Ok(mut stmt) => {
+                let rows = stmt
+                    .query_map(params![path, limit as i64], map_symbol_hit)
                     .map_err(map_db)?;
                 collect_hits(rows)
             }
@@ -757,9 +787,8 @@ impl Store {
         if patterns.is_empty() || limit == 0 {
             return Ok(vec![]);
         }
-        let mut sql = String::from(
-            "SELECT id, sha, author, authored_at, subject, body FROM commits WHERE ",
-        );
+        let mut sql =
+            String::from("SELECT id, sha, author, authored_at, subject, body FROM commits WHERE ");
         for i in 0..patterns.len() {
             if i > 0 {
                 sql.push_str(" OR ");
@@ -1103,6 +1132,70 @@ mod tests {
         assert!(hits[0].0.body.chars().count() <= 801);
         assert_eq!(store.commit_files(hits[0].0.id).unwrap(), vec!["src/ws.ts"]);
         let _ = std::fs::remove_file(&db);
+    }
+
+    #[test]
+    fn lookup_symbols_in_path_is_path_scoped() {
+        let path = tmp_db();
+        let store = Store::create(&path, "/tmp/proj").unwrap();
+        let other = store
+            .upsert_file(&FileRow {
+                id: 0,
+                path: "src/other.ts".into(),
+                language: Some("typescript".into()),
+                hash: "o".into(),
+                size: 1,
+                mtime: 1,
+                parse_status: ParseStatus::Graph,
+            })
+            .unwrap();
+        let session = store
+            .upsert_file(&FileRow {
+                id: 0,
+                path: "src/auth/session.ts".into(),
+                language: Some("typescript".into()),
+                hash: "s".into(),
+                size: 1,
+                mtime: 1,
+                parse_status: ParseStatus::Graph,
+            })
+            .unwrap();
+        let other_syms: Vec<ExtractedSymbol> = (0..60)
+            .map(|i| ExtractedSymbol {
+                name: format!("other_{i}"),
+                kind: SymbolKind::Function,
+                start_line: i + 1,
+                end_line: i + 1,
+                start_byte: 0,
+                end_byte: 1,
+                signature: None,
+            })
+            .collect();
+        store
+            .replace_file_payload(other, &other_syms, None, "src/other.ts")
+            .unwrap();
+        store
+            .replace_file_payload(
+                session,
+                &[ExtractedSymbol {
+                    name: "createSession".into(),
+                    kind: SymbolKind::Function,
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 1,
+                    signature: None,
+                }],
+                None,
+                "src/auth/session.ts",
+            )
+            .unwrap();
+        let hits = store
+            .lookup_symbols_in_path("src/auth/session.ts", 50)
+            .unwrap();
+        assert!(hits.iter().any(|h| h.name == "createSession"));
+        assert!(hits.iter().all(|h| h.path == "src/auth/session.ts"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
