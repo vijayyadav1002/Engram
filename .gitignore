@@ -2,3 +2,5 @@
 .prompts
 .worktrees
 engram/target/
+.engram
+.engramignore
