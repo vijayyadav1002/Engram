@@ -1,5 +1,5 @@
 use std::io::{ErrorKind, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -260,6 +260,85 @@ impl PalaceSearch for CliPalaceSearch {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PalaceOpt {
+    Enable,
+    Disable,
+    Unspecified,
+}
+
+/// Last `palace = true` / `palace = false` line wins; `#` comments ignored.
+pub fn parse_palace_config_toml(text: &str) -> PalaceOpt {
+    let mut opt = PalaceOpt::Unspecified;
+    for line in text.lines() {
+        let line = strip_toml_comment(line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "palace" {
+            continue;
+        }
+        match value.trim() {
+            "true" => opt = PalaceOpt::Enable,
+            "false" => opt = PalaceOpt::Disable,
+            _ => {}
+        }
+    }
+    opt
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    match line.find('#') {
+        Some(i) => &line[..i],
+        None => line,
+    }
+}
+
+fn env_disables(env_palace: &str) -> bool {
+    matches!(
+        env_palace.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no"
+    )
+}
+
+fn env_enables(env_palace: &str) -> bool {
+    matches!(
+        env_palace.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+/// Resolve palace opt-in. Disable always wins (`explicit false` or env `0`/`false`/`no`).
+pub fn resolve_opt_in(
+    explicit: Option<bool>,
+    env_palace: Option<&str>,
+    config_text: Option<&str>,
+) -> bool {
+    if explicit == Some(false) {
+        return false;
+    }
+    if env_palace.is_some_and(env_disables) {
+        return false;
+    }
+    if explicit == Some(true) {
+        return true;
+    }
+    if env_palace.is_some_and(env_enables) {
+        return true;
+    }
+    matches!(
+        parse_palace_config_toml(config_text.unwrap_or("")),
+        PalaceOpt::Enable
+    )
+}
+
+pub fn read_config_text(root: &Path) -> Option<String> {
+    std::fs::read_to_string(root.join(".engram/config.toml")).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +490,35 @@ mod tests {
         };
         assert!(matches!(cli.search("q", 3), Err(PalaceError::Unparseable)));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_off() {
+        assert!(!resolve_opt_in(None, None, None));
+    }
+
+    #[test]
+    fn env_zero_disables_even_if_config_true() {
+        assert!(!resolve_opt_in(None, Some("0"), Some("palace = true\n")));
+    }
+
+    #[test]
+    fn explicit_false_wins() {
+        assert!(!resolve_opt_in(Some(false), Some("1"), Some("palace = true\n")));
+    }
+
+    #[test]
+    fn explicit_true_enables() {
+        assert!(resolve_opt_in(Some(true), None, None));
+    }
+
+    #[test]
+    fn config_true_enables() {
+        assert!(resolve_opt_in(None, None, Some("# hi\npalace = true\n")));
+    }
+
+    #[test]
+    fn env_one_enables() {
+        assert!(resolve_opt_in(None, Some("1"), None));
     }
 }
