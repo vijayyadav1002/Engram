@@ -4,7 +4,7 @@ use engram::compile::{
 };
 use engram::doctor::{run_doctor, run_status};
 use engram::error::Error;
-use engram::index::{index_repo, IndexStats};
+use engram::index::{index_repo_with, IndexOpts, IndexStats};
 use engram::init::{run_init, write_harness, write_skill};
 use engram::render::render_digest;
 use engram::root::{env_root, find_repo_root};
@@ -38,6 +38,9 @@ enum Commands {
     Index {
         #[arg(long)]
         force: bool,
+        /// Nested project directory to index into the workspace DB
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
     },
     /// DB path, schema, counts, last index, stale sample
     Status,
@@ -96,8 +99,24 @@ fn dispatch(cli: Cli) -> Result<(), Error> {
             println!("initialized {}", root.display());
             Ok(())
         }
-        Commands::Index { force } => {
-            let stats = index_repo(&require_root()?, force)?;
+        Commands::Index { force, path } => {
+            let root = require_root()?;
+            let opts = match path {
+                None => IndexOpts::default(),
+                Some(p) => {
+                    let abs = if p.is_absolute() {
+                        p
+                    } else {
+                        current_dir()?.join(p)
+                    };
+                    let resolved = engram::root::resolve_index_walk(&root, &abs)?;
+                    IndexOpts {
+                        walk: resolved.prefix.as_ref().map(|_| resolved.dir),
+                        ..Default::default()
+                    }
+                }
+            };
+            let stats = index_repo_with(&root, force, opts)?;
             print_index_stats(&stats);
             Ok(())
         }

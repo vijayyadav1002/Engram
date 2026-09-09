@@ -99,6 +99,18 @@ Re-run `engram index` after you change code. Unchanged files are skipped by cont
 engram index --force
 ```
 
+A workspace that contains several git projects should keep `.engram/` at the
+**workspace** root (so Grok / Copilot / other CLIs started there see the index).
+Index a nested project without `cd` and without writing `.engram` into that repo:
+
+```bash
+engram index --path apps/web
+```
+
+Files are stored as `web/…` (the last component of `--path`). Re-run for each
+project you want in the workspace index. Plain `engram index` still walks the
+whole workspace with unprefixed paths.
+
 ### Step C — Ask the repo
 
 ```bash
