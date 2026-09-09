@@ -1,7 +1,7 @@
 # Engram Index `--path` Design
 
 Date: 2026-09-08
-Status: draft, pending review
+Status: approved, pending implementation
 Scope: optional `--path` on `engram index` so a workspace can index nested projects into one root `.engram` without polluting those repos
 Depends on: `docs/superpowers/specs/2026-09-07-engram-core-design.md`
 Related: `docs/superpowers/specs/2026-09-08-engram-git-decisions-design.md` (git index stays; this slice adds a namespaced walk, not a second store)
