@@ -39,6 +39,48 @@ pub fn find_repo_root(cwd: &Path, env_root: Option<&Path>) -> Result<PathBuf, Er
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedWalk {
+    pub dir: PathBuf,
+    /// `None` means index the whole workspace with unprefixed paths.
+    pub prefix: Option<String>,
+}
+
+/// Canonicalize `path`. It must exist, be a directory, and sit inside `workspace`
+/// (after both are canonicalized). If `path` is the workspace root, `prefix` is `None`.
+/// Otherwise `prefix` is the last path component (`apps/web` → `Some("web")`).
+pub fn resolve_index_walk(workspace: &Path, path: &Path) -> Result<ResolvedWalk, Error> {
+    if !path.exists() {
+        return Err(Error::Usage(format!("path not found: {}", path.display())));
+    }
+    if !path.is_dir() {
+        return Err(Error::Usage(format!(
+            "path is not a directory: {}",
+            path.display()
+        )));
+    }
+    let dir = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    if dir != root && !dir.starts_with(&root) {
+        return Err(Error::Usage(format!(
+            "path is outside workspace: {}",
+            path.display()
+        )));
+    }
+    let prefix = if dir == root {
+        None
+    } else {
+        let name = dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| Error::Usage("path has no directory name".into()))?;
+        Some(name.to_string())
+    };
+    Ok(ResolvedWalk { dir, prefix })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +118,53 @@ mod tests {
         std::fs::create_dir(b.join(".engram")).unwrap();
         let expected = b.canonicalize().unwrap_or_else(|_| b.clone());
         assert_eq!(find_repo_root(&a, Some(&b)).unwrap(), expected);
+    }
+
+    #[test]
+    fn resolve_nested_prefix_is_basename() {
+        let ws = tempfile_dir();
+        let web = ws.join("apps/web");
+        std::fs::create_dir_all(&web).unwrap();
+        let got = resolve_index_walk(&ws, &web).unwrap();
+        assert_eq!(got.prefix.as_deref(), Some("web"));
+        assert_eq!(got.dir, web.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolve_workspace_root_has_no_prefix() {
+        let ws = tempfile_dir();
+        let got = resolve_index_walk(&ws, &ws).unwrap();
+        assert_eq!(got.prefix, None);
+        assert_eq!(got.dir, ws.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolve_missing_path_is_usage() {
+        let ws = tempfile_dir();
+        let err = resolve_index_walk(&ws, &ws.join("nope")).unwrap_err();
+        assert!(matches!(err, Error::Usage(_)));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolve_file_is_usage() {
+        let ws = tempfile_dir();
+        let file = ws.join("readme");
+        std::fs::write(&file, "x").unwrap();
+        let err = resolve_index_walk(&ws, &file).unwrap_err();
+        assert!(matches!(err, Error::Usage(_)));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolve_outside_workspace_is_usage() {
+        let ws = tempfile_dir();
+        let other = tempfile_dir();
+        let err = resolve_index_walk(&ws, &other).unwrap_err();
+        assert!(matches!(err, Error::Usage(_)));
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&other);
     }
 }
