@@ -201,3 +201,107 @@ fn bare_index_still_unprefixed() {
     assert!(store.get_file("web/src/a.ts").unwrap().is_none());
     let _ = fs::remove_dir_all(&root);
 }
+
+use engram::git::{FakeGitSource, GitCommit, GitIndexStatus};
+use std::sync::Arc;
+
+fn fake_web() -> FakeGitSource {
+    FakeGitSource {
+        head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        ancestor: false,
+        commits: vec![GitCommit {
+            sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            author: "Ada".into(),
+            authored_at: "2026-01-01T00:00:00Z".into(),
+            subject: "use websockets".into(),
+            body: "replace polling".into(),
+            files: vec!["src/a.ts".into()],
+        }],
+        head_err: None,
+        log_err: None,
+    }
+}
+
+#[test]
+fn nested_git_prefixes_commit_files_and_leaves_meta_head() {
+    let root = workspace();
+    fs::create_dir_all(root.join("apps/web/.git")).unwrap();
+    let before = db(&root).meta().unwrap().git_head.clone();
+    let stats = index_repo_with(
+        &root,
+        false,
+        IndexOpts {
+            walk: Some(root.join("apps/web")),
+            git: Some(Arc::new(fake_web())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stats.git, GitIndexStatus::Ok);
+    assert!(stats.commits >= 1);
+    let store = db(&root);
+    assert_eq!(store.meta().unwrap().git_head, before);
+    let hits = store.search_commits_fts("websockets", 5).unwrap();
+    assert_eq!(hits.len(), 1);
+    let files = store
+        .list_files()
+        .unwrap()
+        .into_iter()
+        .map(|f| f.path)
+        .collect::<Vec<_>>();
+    assert!(files.iter().any(|p| p == "web/src/a.ts"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn nested_without_git_is_absent_and_inserts_no_commits() {
+    let root = workspace();
+    let stats = index_repo_with(
+        &root,
+        false,
+        IndexOpts {
+            walk: Some(root.join("apps/web")),
+            git: Some(Arc::new(fake_web())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(stats.git, GitIndexStatus::Absent);
+    assert_eq!(stats.commits, 0);
+    let store = db(&root);
+    assert!(store
+        .search_commits_fts("websockets", 5)
+        .unwrap()
+        .is_empty());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn force_path_does_not_clear_commits() {
+    let root = workspace();
+    fs::create_dir_all(root.join("apps/web/.git")).unwrap();
+    index_repo_with(
+        &root,
+        false,
+        IndexOpts {
+            walk: Some(root.join("apps/web")),
+            git: Some(Arc::new(fake_web())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    index_repo_with(
+        &root,
+        true,
+        IndexOpts {
+            walk: Some(root.join("apps/api")),
+            git: Some(Arc::new(fake_web())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let store = db(&root);
+    assert_eq!(store.search_commits_fts("websockets", 5).unwrap().len(), 1);
+    assert!(store.get_file("web/src/a.ts").unwrap().is_some());
+    let _ = fs::remove_dir_all(&root);
+}

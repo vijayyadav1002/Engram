@@ -224,7 +224,15 @@ pub fn index_repo_with(root: &Path, force: bool, opts: IndexOpts) -> Result<Inde
     stats.files = file_count as u64;
     stats.symbols = symbol_count as u64;
     stats.edges = edge_count as u64;
-    index_git(&store, root, force, opts, &mut stats)?;
+    index_git(
+        &store,
+        &workspace,
+        &walk,
+        prefix.as_deref(),
+        force,
+        opts,
+        &mut stats,
+    )?;
     Ok(stats)
 }
 
@@ -248,17 +256,76 @@ fn git_fail(store: &Store, stats: &mut IndexStats, status: GitIndexStatus) -> Re
 
 fn index_git(
     store: &Store,
-    root: &Path,
+    workspace: &Path,
+    walk: &Path,
+    prefix: Option<&str>,
     force: bool,
     opts: IndexOpts,
     stats: &mut IndexStats,
 ) -> Result<(), Error> {
+    if let Some(name) = prefix {
+        if !walk.join(".git").exists() {
+            let meta = store.meta()?;
+            stats.git = GitIndexStatus::Absent;
+            stats.commits = meta.commit_count as u64;
+            return Ok(());
+        }
+        let git = opts
+            .git
+            .unwrap_or_else(|| Arc::new(CliGitSource::default()));
+        let head = match git.head_sha(walk) {
+            Ok(h) => h,
+            Err(e) => {
+                let meta = store.meta()?;
+                stats.git = map_git_err(e);
+                stats.commits = meta.commit_count as u64;
+                return Ok(());
+            }
+        };
+        let _ = head;
+        let commits = match git.log(walk, GitRange::Head) {
+            Ok(c) => c,
+            Err(e) => {
+                let meta = store.meta()?;
+                stats.git = map_git_err(e);
+                stats.commits = meta.commit_count as u64;
+                return Ok(());
+            }
+        };
+        // insert_commit does not bump meta.commit_count; nested must not set_git_meta.
+        let mut count = store.meta()?.commit_count;
+        for c in commits {
+            let files: Vec<String> = c
+                .files
+                .iter()
+                .map(|f| {
+                    let f = f.trim_start_matches("./");
+                    format!("{name}/{f}")
+                })
+                .collect();
+            let hit = CommitHit {
+                id: 0,
+                sha: c.sha,
+                author: c.author,
+                authored_at: c.authored_at,
+                subject: c.subject,
+                body: c.body,
+            };
+            if store.insert_commit(&hit, &files)? {
+                count += 1;
+            }
+        }
+        stats.git = GitIndexStatus::Ok;
+        stats.commits = count as u64;
+        return Ok(());
+    }
+
     if force {
         store.clear_commits()?;
         store.set_git_meta(None, 0, "absent")?;
     }
 
-    if !root.join(".git").exists() {
+    if !workspace.join(".git").exists() {
         let meta = store.meta()?;
         stats.git = GitIndexStatus::Absent;
         stats.commits = meta.commit_count as u64;
@@ -268,18 +335,20 @@ fn index_git(
     let git = opts
         .git
         .unwrap_or_else(|| Arc::new(CliGitSource::default()));
-    let head = match git.head_sha(root) {
+    let head = match git.head_sha(workspace) {
         Ok(h) => h,
         Err(e) => return git_fail(store, stats, map_git_err(e)),
     };
 
     let meta = store.meta()?;
     let range = match &meta.git_head {
-        Some(old) if git.is_ancestor(root, old, &head) == Ok(true) => GitRange::After(old.clone()),
+        Some(old) if git.is_ancestor(workspace, old, &head) == Ok(true) => {
+            GitRange::After(old.clone())
+        }
         _ => GitRange::Head,
     };
 
-    let commits = match git.log(root, range) {
+    let commits = match git.log(workspace, range) {
         Ok(c) => c,
         Err(e) => return git_fail(store, stats, map_git_err(e)),
     };
