@@ -42,6 +42,7 @@ fn repo() -> PathBuf {
         true,
         IndexOpts {
             git: Some(Arc::new(fake)),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -188,6 +189,7 @@ fn subject_hit_survives_fts_why_cap() {
         true,
         IndexOpts {
             git: Some(Arc::new(fake)),
+            ..Default::default()
         },
     )
     .unwrap();

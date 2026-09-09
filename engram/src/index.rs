@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
@@ -45,6 +45,18 @@ pub struct IndexStats {
 
 pub struct IndexOpts {
     pub git: Option<Arc<dyn GitSource>>,
+    /// Nested directory to walk. `None` walks `root`. If canonical `walk` equals
+    /// `root`, behave as `None` (unprefixed full index).
+    pub walk: Option<PathBuf>,
+}
+
+impl Default for IndexOpts {
+    fn default() -> Self {
+        Self {
+            git: None,
+            walk: None,
+        }
+    }
 }
 
 struct WorkItem {
@@ -68,14 +80,28 @@ enum Outcome {
 ///
 /// The database must already exist (`Store::create` / `engram init`).
 pub fn index_repo(root: &Path, force: bool) -> Result<IndexStats, Error> {
-    index_repo_with(root, force, IndexOpts { git: None })
+    index_repo_with(root, force, IndexOpts::default())
 }
 
 pub fn index_repo_with(root: &Path, force: bool, opts: IndexOpts) -> Result<IndexStats, Error> {
+    let workspace = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let walk = opts
+        .walk
+        .as_ref()
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+        .unwrap_or_else(|| workspace.clone());
+    let prefix: Option<String> = if walk == workspace {
+        None
+    } else {
+        walk.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+    };
+
     let db_path = root.join(".engram/index.sqlite");
     let store = Store::open_write(&db_path)?;
 
-    let paths = collect_paths(root);
+    let paths = collect_paths(&walk, &workspace);
     let existing: HashMap<String, String> = store
         .list_files()?
         .into_iter()
@@ -84,7 +110,13 @@ pub fn index_repo_with(root: &Path, force: bool, opts: IndexOpts) -> Result<Inde
 
     let outcomes: Vec<Outcome> = paths
         .into_par_iter()
-        .map(|rel| process_file(root, &rel, &existing, force))
+        .map(|fs_rel| {
+            let stored = match &prefix {
+                Some(name) => format!("{name}/{fs_rel}"),
+                None => fs_rel.clone(),
+            };
+            process_file(&walk, &fs_rel, &stored, &existing, force)
+        })
         .collect();
 
     let mut stats = IndexStats::default();
@@ -176,6 +208,12 @@ pub fn index_repo_with(root: &Path, force: bool, opts: IndexOpts) -> Result<Inde
     }
 
     for path in existing.keys() {
+        if let Some(name) = prefix.as_deref() {
+            let pfx = format!("{name}/");
+            if !path.starts_with(&pfx) {
+                continue;
+            }
+        }
         if !seen.contains(path) {
             store.delete_file_by_path(path)?;
         }
@@ -275,8 +313,8 @@ fn bump_skip(stats: &mut IndexStats, kind: SkipKind) {
     }
 }
 
-fn collect_paths(root: &Path) -> Vec<String> {
-    let mut builder = ignore::WalkBuilder::new(root);
+fn collect_paths(walk: &Path, workspace: &Path) -> Vec<String> {
+    let mut builder = ignore::WalkBuilder::new(walk);
     builder
         .hidden(true)
         .git_ignore(true)
@@ -284,7 +322,10 @@ fn collect_paths(root: &Path) -> Vec<String> {
         .git_exclude(false)
         .require_git(false)
         .parents(false);
-    if root.join(".engramignore").is_file() {
+    if walk != workspace && workspace.join(".engramignore").is_file() {
+        let _ = builder.add_ignore(workspace.join(".engramignore"));
+    }
+    if walk.join(".engramignore").is_file() {
         builder.add_custom_ignore_filename(".engramignore");
     }
     builder.filter_entry(|entry| {
@@ -303,7 +344,7 @@ fn collect_paths(root: &Path) -> Vec<String> {
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             continue;
         }
-        if let Some(rel) = posix_rel(root, entry.path()) {
+        if let Some(rel) = posix_rel(walk, entry.path()) {
             paths.push(rel);
         }
     }
@@ -321,17 +362,18 @@ fn posix_rel(root: &Path, full: &Path) -> Option<String> {
 }
 
 fn process_file(
-    root: &Path,
-    rel: &str,
+    fs_root: &Path,
+    fs_rel: &str,
+    stored_rel: &str,
     existing: &HashMap<String, String>,
     force: bool,
 ) -> Outcome {
-    match should_skip(root, rel, None) {
+    match should_skip(fs_root, fs_rel, None) {
         SkipKind::Keep => {}
         kind => return Outcome::Skipped(kind),
     }
 
-    let full = root.join(rel);
+    let full = fs_root.join(fs_rel);
     let meta = match fs::metadata(&full) {
         Ok(m) => m,
         Err(_) => return Outcome::Failed,
@@ -344,21 +386,21 @@ fn process_file(
         Ok(b) => b,
         Err(_) => return Outcome::Failed,
     };
-    match should_skip(root, rel, Some(&bytes)) {
+    match should_skip(fs_root, fs_rel, Some(&bytes)) {
         SkipKind::Keep => {}
         kind => return Outcome::Skipped(kind),
     }
 
     let hash = blake3_hex(&bytes);
-    if !force && existing.get(rel).map(String::as_str) == Some(hash.as_str()) {
+    if !force && existing.get(stored_rel).map(String::as_str) == Some(hash.as_str()) {
         return Outcome::Unchanged {
-            rel: rel.to_string(),
+            rel: stored_rel.to_string(),
         };
     }
 
     let source = String::from_utf8_lossy(&bytes).into_owned();
-    let rel_owned = rel.to_string();
-    let extraction = match catch_unwind(AssertUnwindSafe(|| extract_path(&rel_owned, &source))) {
+    let stored_owned = stored_rel.to_string();
+    let extraction = match catch_unwind(AssertUnwindSafe(|| extract_path(&stored_owned, &source))) {
         Ok(ext) => ext,
         Err(_) => Extraction {
             status: ParseStatus::Error,
@@ -368,11 +410,11 @@ fn process_file(
     };
 
     Outcome::Work(WorkItem {
-        rel: rel_owned,
+        rel: stored_owned,
         hash,
         size: bytes.len() as i64,
         mtime: mtime_secs(&meta),
-        language: language_of(rel).map(str::to_string),
+        language: language_of(stored_rel).map(str::to_string),
         extraction,
         fts: source,
     })
@@ -682,6 +724,7 @@ mod tests {
             false,
             IndexOpts {
                 git: Some(Arc::new(fake)),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -701,6 +744,7 @@ mod tests {
             false,
             IndexOpts {
                 git: Some(Arc::new(fake.clone())),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -719,6 +763,7 @@ mod tests {
             false,
             IndexOpts {
                 git: Some(Arc::new(fake)),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -735,6 +780,7 @@ mod tests {
             false,
             IndexOpts {
                 git: Some(Arc::new(fake)),
+                ..Default::default()
             },
         )
         .unwrap();
