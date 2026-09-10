@@ -1,4 +1,4 @@
-use engram::compile::get_context;
+use engram::compile::{get_context, search_code};
 use engram::index::index_repo;
 use engram::store::Store;
 use std::fs;
@@ -65,6 +65,10 @@ fn has_path(pkg: &engram::types::ContextPackage, suffix: &str) -> bool {
     pkg.items.iter().any(|i| i.path.ends_with(suffix))
 }
 
+fn has_hit_path(hits: &[engram::store::FtsHit], suffix: &str) -> bool {
+    hits.iter().any(|h| h.path.ends_with(suffix))
+}
+
 #[test]
 fn fts_promotes_trash_item_row_not_only_file_snippet() {
     let root = trash_fixture();
@@ -129,4 +133,24 @@ fn golden_trash_retention_days_includes_trash_ts() {
                 .any(|i| i.symbol.as_deref() == Some("TRASH_RETENTION_DAYS")),
         "config.ts or TRASH_RETENTION_DAYS should also appear"
     );
+}
+
+#[test]
+fn fts_hyphen_underscore_or_fallback_includes_trash_ts() {
+    let root = trash_fixture();
+    index_repo(&root, true).unwrap();
+    let hyphen = search_code(&root, "does trash soft-delete work", 30).unwrap();
+    assert!(
+        has_hit_path(&hyphen, "services/trash.ts"),
+        "hyphen OR fallback hits: {:?}",
+        hyphen.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+    );
+    assert!(hyphen.len() <= 30);
+    let under = search_code(&root, "TRASH_RETENTION_DAYS", 30).unwrap();
+    assert!(
+        has_hit_path(&under, "services/trash.ts"),
+        "underscore OR fallback hits: {:?}",
+        under.iter().map(|h| h.path.clone()).collect::<Vec<_>>()
+    );
+    assert!(under.len() <= 30);
 }

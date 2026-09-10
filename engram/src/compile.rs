@@ -265,25 +265,14 @@ pub fn get_context_with(
 
     let qtokens = basename_tokens(&plan);
     if !first_pass.iter().any(|s| span_matches_query(s, &qtokens)) {
-        let mut present: HashSet<String> = first_pass.iter().map(|s| s.path.clone()).collect();
+        let present: HashSet<String> = first_pass.iter().map(|s| s.path.clone()).collect();
         let mut extra: Vec<SpanCand> = Vec::new();
         for (idx, hit) in fts_hits.iter().enumerate() {
-            if !present.insert(hit.path.clone()) {
+            if present.contains(&hit.path) {
                 continue;
             }
             let fts_norm = 1.0 / (1.0 + idx as f64);
             extra.extend(fts_spans_for_hit(&store, hit, fts_norm, &plan, &qtokens)?);
-        }
-        let mut extra_idx = fts_hits.len();
-        for term in fts_rescue_terms(&qtokens) {
-            for hit in fts_try(&store, &term, CAP_FTS)? {
-                if !present.insert(hit.path.clone()) {
-                    continue;
-                }
-                extra_idx += 1;
-                let fts_norm = 1.0 / (1.0 + extra_idx as f64);
-                extra.extend(fts_spans_for_hit(&store, &hit, fts_norm, &plan, &qtokens)?);
-            }
         }
         for s in &mut extra {
             if qtokens.iter().any(|t| stem_matches_token(&s.path, t)) {
@@ -560,23 +549,6 @@ fn push_unique(out: &mut Vec<String>, item: String) {
     }
 }
 
-fn fts_rescue_terms(tokens: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for t in tokens {
-        if t.contains('-') || t.contains('_') {
-            for part in t.split(|c: char| c == '_' || c == '-') {
-                if part.is_empty() || is_stopword(part) {
-                    continue;
-                }
-                push_unique(&mut out, part.to_string());
-            }
-        } else if !is_stopword(t) {
-            push_unique(&mut out, t.clone());
-        }
-    }
-    out
-}
-
 fn collect_fts(store: &Store, plan: &QueryPlan) -> Result<Vec<FtsHit>, Error> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -607,10 +579,44 @@ fn collect_fts(store: &Store, plan: &QueryPlan) -> Result<Vec<FtsHit>, Error> {
     Ok(out)
 }
 
+fn hyphen_underscore_or_query(query: &str) -> Option<String> {
+    if !(query.contains('-') || query.contains('_')) {
+        return None;
+    }
+    let parts: Vec<&str> = query
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    Some(parts.join(" OR "))
+}
+
 fn fts_try(store: &Store, query: &str, limit: usize) -> Result<Vec<FtsHit>, Error> {
     if query.trim().is_empty() || limit == 0 {
         return Ok(vec![]);
     }
+    let mut out = fts_match(store, query, limit)?;
+    let Some(or_q) = hyphen_underscore_or_query(query) else {
+        return Ok(out);
+    };
+    if out.len() >= limit {
+        return Ok(out);
+    }
+    let mut seen: HashSet<String> = out.iter().map(|h| h.path.clone()).collect();
+    for h in fts_match(store, &or_q, limit)? {
+        if seen.insert(h.path.clone()) {
+            out.push(h);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn fts_match(store: &Store, query: &str, limit: usize) -> Result<Vec<FtsHit>, Error> {
     match store.fts_search(query, limit) {
         Ok(hits) => Ok(hits),
         Err(_) => {
@@ -1482,18 +1488,14 @@ fn span_matches_query_uses_stem_or_symbol() {
 }
 
 #[test]
-fn fts_rescue_terms_splits_hyphen_and_underscore() {
+fn hyphen_underscore_or_query_joins_parts() {
     assert_eq!(
-        fts_rescue_terms(&[
-            "does".into(),
-            "trash".into(),
-            "soft-delete".into(),
-            "work".into()
-        ]),
-        vec!["does", "trash", "soft", "delete", "work"]
+        hyphen_underscore_or_query("does trash soft-delete work").as_deref(),
+        Some("does OR trash OR soft OR delete OR work")
     );
     assert_eq!(
-        fts_rescue_terms(&["TRASH_RETENTION_DAYS".into()]),
-        vec!["TRASH", "RETENTION", "DAYS"]
+        hyphen_underscore_or_query("TRASH_RETENTION_DAYS").as_deref(),
+        Some("TRASH OR RETENTION OR DAYS")
     );
+    assert_eq!(hyphen_underscore_or_query("trash retention"), None);
 }
