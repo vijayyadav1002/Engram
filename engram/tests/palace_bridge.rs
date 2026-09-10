@@ -87,6 +87,7 @@ fn fake_three_drawers_budget_keeps_two() {
             room: format!("r{i}"),
             source: "s".into(),
             text: drawer_text.clone(),
+            cosine: None,
         })
         .collect();
     let fake = Arc::new(FakePalaceSearch {

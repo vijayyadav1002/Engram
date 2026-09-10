@@ -10,13 +10,15 @@ pub const PALACE_ITEM_MAX_CHARS: usize = 1200;
 pub const PALACE_MIN_REMAINING: u32 = 200;
 pub const PALACE_TIMEOUT_MS: u64 = 8000;
 pub const PALACE_QUERY_MAX_CHARS: usize = 250;
+pub const PALACE_MIN_COSINE_DEFAULT: f64 = 0.6;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PalaceDrawer {
     pub wing: String,
     pub room: String,
     pub source: String,
     pub text: String,
+    pub cosine: Option<f64>,
 }
 
 /// First `PALACE_QUERY_MAX_CHARS` characters of `query`.
@@ -49,6 +51,7 @@ pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
             i += 1;
             let mut source = String::new();
             let mut body = String::new();
+            let mut cosine = None;
             let mut in_body = false;
             while i < lines.len() {
                 let next = lines[i];
@@ -66,6 +69,7 @@ pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
                         continue;
                     }
                     if nt.starts_with("Match:") {
+                        cosine = parse_cosine_from_match(nt);
                         i += 1;
                         continue;
                     }
@@ -102,6 +106,7 @@ pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
                     room,
                     source,
                     text: body,
+                    cosine,
                 });
             }
             continue;
@@ -134,6 +139,16 @@ fn parse_hit_header(trimmed: &str) -> Option<(String, String)> {
 
 fn is_rule_line(trimmed: &str) -> bool {
     trimmed.starts_with('─') || trimmed.starts_with("──")
+}
+
+fn parse_cosine_from_match(trimmed: &str) -> Option<f64> {
+    let rest = trimmed.strip_prefix("Match:")?;
+    for part in rest.split_whitespace() {
+        if let Some(v) = part.strip_prefix("cosine=") {
+            return v.parse().ok();
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,9 +287,22 @@ pub enum PalaceOpt {
     Unspecified,
 }
 
-/// Last `palace = true` / `palace = false` line wins; `#` comments ignored.
-pub fn parse_palace_config_toml(text: &str) -> PalaceOpt {
-    let mut opt = PalaceOpt::Unspecified;
+#[derive(Debug, Clone, PartialEq)]
+pub struct PalaceFileConfig {
+    pub opt: PalaceOpt,
+    pub wing: Option<String>,
+    pub room: Option<String>,
+    pub min_cosine: f64,
+}
+
+/// Line-oriented palace file keys; last assignment wins; `#` comments ignored.
+pub fn parse_palace_file_config(text: &str) -> PalaceFileConfig {
+    let mut cfg = PalaceFileConfig {
+        opt: PalaceOpt::Unspecified,
+        wing: None,
+        room: None,
+        min_cosine: PALACE_MIN_COSINE_DEFAULT,
+    };
     for line in text.lines() {
         let line = strip_toml_comment(line).trim();
         if line.is_empty() {
@@ -283,16 +311,49 @@ pub fn parse_palace_config_toml(text: &str) -> PalaceOpt {
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        if key.trim() != "palace" {
-            continue;
-        }
-        match value.trim() {
-            "true" => opt = PalaceOpt::Enable,
-            "false" => opt = PalaceOpt::Disable,
+        let value = value.trim();
+        match key.trim() {
+            "palace" => match value {
+                "true" => cfg.opt = PalaceOpt::Enable,
+                "false" => cfg.opt = PalaceOpt::Disable,
+                _ => {}
+            },
+            "palace_wing" => cfg.wing = nonempty_unquoted(value),
+            "palace_room" => cfg.room = nonempty_unquoted(value),
+            "palace_min_cosine" => {
+                if let Ok(v) = unquote_toml(value).parse::<f64>() {
+                    if (0.0..=2.0).contains(&v) {
+                        cfg.min_cosine = v;
+                    }
+                }
+            }
             _ => {}
         }
     }
-    opt
+    cfg
+}
+
+/// Last `palace = true` / `palace = false` line wins; `#` comments ignored.
+pub fn parse_palace_config_toml(text: &str) -> PalaceOpt {
+    parse_palace_file_config(text).opt
+}
+
+fn unquote_toml(value: &str) -> &str {
+    let v = value.trim();
+    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+        &v[1..v.len() - 1]
+    } else {
+        v
+    }
+}
+
+fn nonempty_unquoted(value: &str) -> Option<String> {
+    let s = unquote_toml(value).trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 fn strip_toml_comment(line: &str) -> &str {
@@ -418,6 +479,52 @@ mod tests {
         assert!(hits[0].text.contains('}'), "JSON fragment brace is drawer text");
         assert_eq!(hits[1].source, "segment_000.md");
         assert!(hits[1].text.contains("TSX extractor"));
+        assert_eq!(hits[0].cosine, Some(0.686));
+        assert_eq!(hits[1].cosine, Some(0.488));
+    }
+
+    #[test]
+    fn parse_file_config_reads_wing_room_floor() {
+        let cfg = parse_palace_file_config(
+            "palace = false\n\
+             palace_wing = \"engram\"\n\
+             palace_room = \"decisions\"\n\
+             palace_min_cosine = 0.6\n",
+        );
+        assert_eq!(cfg.opt, PalaceOpt::Disable);
+        assert_eq!(cfg.wing.as_deref(), Some("engram"));
+        assert_eq!(cfg.room.as_deref(), Some("decisions"));
+        assert!((cfg.min_cosine - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_file_config_empty_wing_is_none() {
+        let cfg = parse_palace_file_config("palace_wing = \"\"\n");
+        assert!(cfg.wing.is_none());
+        assert!((cfg.min_cosine - PALACE_MIN_COSINE_DEFAULT).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_file_config_bad_cosine_keeps_default() {
+        let cfg = parse_palace_file_config("palace_min_cosine = 9\n");
+        assert!((cfg.min_cosine - PALACE_MIN_COSINE_DEFAULT).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_cosine_from_match_line() {
+        let out = "  [1] sessions / technical\n      Source: summary.json\n      Match:  cosine=0.686  bm25=1.644\n\n      body\n";
+        let hits = parse_search_output(out);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "body");
+        assert_eq!(hits[0].cosine, Some(0.686));
+    }
+
+    #[test]
+    fn parse_missing_cosine_is_none() {
+        let out = "  [1] w / r\n      Source: s\n      hello\n";
+        let hits = parse_search_output(out);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].cosine, None);
     }
 
     #[test]
@@ -442,6 +549,7 @@ mod tests {
                 room: "r".into(),
                 source: "s".into(),
                 text: "hello".into(),
+                cosine: None,
             }],
             error: None,
         };
