@@ -225,12 +225,23 @@ pub fn get_context_with(
         .filter(|s| s.why.contains("exact_symbol"))
         .map(|s| s.path.clone())
         .collect();
+    let btoks = basename_tokens(&plan);
+    for s in &mut fused {
+        if btoks.iter().any(|t| stem_matches_token(&s.path, t)) {
+            s.why.insert("path_basename".into());
+        }
+    }
     for s in &mut fused {
         rescore(s, &plan.path_hints, &top_files);
     }
 
     let deduped = dedupe_spans(fused);
     let mut scored = deduped;
+    for s in &mut scored {
+        if btoks.iter().any(|t| stem_matches_token(&s.path, t)) {
+            s.why.insert("path_basename".into());
+        }
+    }
     for s in &mut scored {
         rescore(s, &plan.path_hints, &top_files);
     }
@@ -390,6 +401,33 @@ fn is_path_hint(token: &str) -> bool {
     }
     let mut chars = token.chars();
     matches!(chars.next(), Some('.')) && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+}
+
+fn file_stem(path: &str) -> &str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name.rfind('.') {
+        Some(i) if i > 0 => &name[..i],
+        _ => name,
+    }
+}
+
+fn stem_matches_token(path: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let stem = file_stem(path).to_ascii_lowercase();
+    let tok = token.to_ascii_lowercase();
+    stem == tok || stem.starts_with(&format!("{tok}_")) || stem.starts_with(&format!("{tok}-"))
+}
+
+fn basename_tokens(plan: &QueryPlan) -> Vec<String> {
+    let mut out = plan.symbol_terms.clone();
+    for w in plan.fts_query.split_whitespace() {
+        if !is_stopword(w) {
+            push_unique(&mut out, w.to_string());
+        }
+    }
+    out
 }
 
 fn is_symbol_term(token: &str) -> bool {
@@ -840,6 +878,9 @@ fn rescore(span: &mut SpanCand, path_hints: &[String], top_files: &HashSet<Strin
     if span.why.contains("prefix_symbol") {
         score += 3.0;
     }
+    if span.why.contains("path_basename") {
+        score += 3.0;
+    }
     if span.why.contains("fts") {
         score += 2.0 * span.fts_norm;
     }
@@ -1223,4 +1264,80 @@ fn plan_extracts_quotes_camel_paths() {
     assert!(p.symbol_terms.iter().any(|t| t == "createSession"));
     assert!(p.symbol_terms.iter().any(|t| t == "LoginBanner"));
     assert!(p.path_hints.iter().any(|h| h.contains("src/auth")));
+}
+
+#[test]
+fn plan_trash_retention_is_fts_not_path_hint() {
+    let p = plan_query("how does trash soft-delete work?");
+    assert!(
+        !p.path_hints.iter().any(|h| h.eq_ignore_ascii_case("trash")),
+        "trash must not become a path hint: {:?}",
+        p.path_hints
+    );
+    assert!(
+        !p.symbol_terms.iter().any(|t| t == "trash"),
+        "lowercase trash is FTS, not a symbol: {:?}",
+        p.symbol_terms
+    );
+    assert!(p.fts_query.to_ascii_lowercase().contains("trash"));
+}
+
+#[test]
+fn stem_matches_token_prefix_separator_not_substring() {
+    assert!(stem_matches_token("services/trash.ts", "trash"));
+    assert!(stem_matches_token("Trash.ts", "trash"));
+    assert!(stem_matches_token("trash_service.ts", "trash"));
+    assert!(stem_matches_token("lib/trash-service.ts", "trash"));
+    assert!(!stem_matches_token("lib/mytrash.ts", "trash"));
+    assert!(!stem_matches_token("services/config.ts", "trash"));
+}
+
+#[test]
+fn rescore_path_basename_beats_fts_only() {
+    use std::collections::BTreeSet;
+    let mut trash = SpanCand {
+        path: "services/trash.ts".into(),
+        start_line: 1,
+        end_line: 10,
+        symbol: Some("purgeTrash".into()),
+        kind: Some("function".into()),
+        why: {
+            let mut w = BTreeSet::new();
+            w.insert("fts".into());
+            w.insert("path_basename".into());
+            w
+        },
+        fts_norm: 0.5,
+        neighbor_high: false,
+        neighbor_low: false,
+        score: 0.0,
+        prequoted: None,
+    };
+    let mut ui = SpanCand {
+        path: "RemoveTagsDialog.tsx".into(),
+        start_line: 1,
+        end_line: 10,
+        symbol: None,
+        kind: None,
+        why: {
+            let mut w = BTreeSet::new();
+            w.insert("fts".into());
+            w
+        },
+        fts_norm: 1.0,
+        neighbor_high: false,
+        neighbor_low: false,
+        score: 0.0,
+        prequoted: None,
+    };
+    let hints: Vec<String> = vec![];
+    let top = HashSet::new();
+    rescore(&mut trash, &hints, &top);
+    rescore(&mut ui, &hints, &top);
+    assert!(
+        trash.score > ui.score,
+        "basename+fts {} vs fts-only {}",
+        trash.score,
+        ui.score
+    );
 }
