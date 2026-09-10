@@ -61,7 +61,6 @@ fn trash_fixture() -> PathBuf {
     root
 }
 
-#[allow(dead_code)] // Task 5 golden queries
 fn has_path(pkg: &engram::types::ContextPackage, suffix: &str) -> bool {
     pkg.items.iter().any(|i| i.path.ends_with(suffix))
 }
@@ -88,4 +87,46 @@ fn fts_promotes_trash_item_row_not_only_file_snippet() {
         .items
         .iter()
         .all(|i| i.kind.as_deref() != Some("palace")));
+}
+
+#[test]
+fn golden_trash_soft_delete_includes_trash_ts() {
+    let root = trash_fixture();
+    index_repo(&root, true).unwrap();
+    let pkg = get_context(&root, "how does trash soft-delete work?", 3000).unwrap();
+    assert!(
+        has_path(&pkg, "services/trash.ts"),
+        "items: {:?}",
+        pkg.items.iter().map(|i| i.path.clone()).collect::<Vec<_>>()
+    );
+    assert!(pkg.used_tokens <= 3000);
+    assert!(pkg
+        .items
+        .iter()
+        .all(|i| i.kind.as_deref() != Some("palace")));
+}
+
+#[test]
+fn golden_trash_retention_includes_trash_ts() {
+    let root = trash_fixture();
+    index_repo(&root, true).unwrap();
+    let pkg = get_context(&root, "trash retention", 3000).unwrap();
+    assert!(has_path(&pkg, "services/trash.ts"));
+    assert!(pkg.used_tokens <= 3000);
+}
+
+#[test]
+fn golden_trash_retention_days_includes_trash_ts() {
+    let root = trash_fixture();
+    index_repo(&root, true).unwrap();
+    let pkg = get_context(&root, "TRASH_RETENTION_DAYS", 3000).unwrap();
+    assert!(has_path(&pkg, "services/trash.ts"));
+    assert!(
+        has_path(&pkg, "config.ts")
+            || pkg
+                .items
+                .iter()
+                .any(|i| i.symbol.as_deref() == Some("TRASH_RETENTION_DAYS")),
+        "config.ts or TRASH_RETENTION_DAYS should also appear"
+    );
 }

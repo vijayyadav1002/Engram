@@ -141,31 +141,9 @@ pub fn get_context_with(
 
     for (idx, hit) in fts_hits.iter().enumerate() {
         let fts_norm = 1.0 / (1.0 + idx as f64);
-        let file_syms = store.lookup_symbols_in_path(&hit.path, CAP_SYMBOLS)?;
-        let mut promoted = 0usize;
-        for h in &file_syms {
-            if h.kind == SymbolKind::Heading || h.kind == SymbolKind::Selector {
-                continue;
-            }
-            let contains = fts_terms.iter().any(|t| {
-                h.name.eq_ignore_ascii_case(t)
-                    || h.name.to_ascii_lowercase().contains(&t.to_ascii_lowercase())
-            });
-            if !contains {
-                continue;
-            }
-            let exact = plan
-                .symbol_terms
-                .iter()
-                .any(|t| h.name.eq_ignore_ascii_case(t));
-            let mut why = why_for_symbol(h, exact);
-            why.insert("fts".into());
-            let mut span = span_from_symbol(h, why);
-            span.fts_norm = fts_norm;
-            spans.push(span);
-            promoted += 1;
-        }
-        if promoted > 0 {
+        let file_spans = fts_spans_for_hit(&store, hit, fts_norm, &plan, &fts_terms)?;
+        if file_spans.iter().any(|s| s.symbol.is_some()) {
+            spans.extend(file_spans);
             continue;
         }
         if let Some(heading) = heading_in_file(&store, &hit.path, &terms_for_heading, &symbol_hits)?
@@ -177,21 +155,7 @@ pub fn get_context_with(
             span.fts_norm = fts_norm;
             spans.push(span);
         } else {
-            let mut why = BTreeSet::new();
-            why.insert("fts".into());
-            spans.push(SpanCand {
-                path: hit.path.clone(),
-                start_line: 1,
-                end_line: FTS_SPAN_LINES,
-                symbol: None,
-                kind: None,
-                why,
-                fts_norm,
-                neighbor_high: false,
-                neighbor_low: false,
-                score: 0.0,
-                prequoted: None,
-            });
+            spans.extend(file_spans);
         }
     }
 
@@ -297,6 +261,48 @@ pub fn get_context_with(
         } else {
             overflow.push(s);
         }
+    }
+
+    let qtokens = basename_tokens(&plan);
+    if !first_pass.iter().any(|s| span_matches_query(s, &qtokens)) {
+        let mut present: HashSet<String> = first_pass.iter().map(|s| s.path.clone()).collect();
+        let mut extra: Vec<SpanCand> = Vec::new();
+        for (idx, hit) in fts_hits.iter().enumerate() {
+            if !present.insert(hit.path.clone()) {
+                continue;
+            }
+            let fts_norm = 1.0 / (1.0 + idx as f64);
+            extra.extend(fts_spans_for_hit(&store, hit, fts_norm, &plan, &qtokens)?);
+        }
+        let mut extra_idx = fts_hits.len();
+        for term in fts_rescue_terms(&qtokens) {
+            for hit in fts_try(&store, &term, CAP_FTS)? {
+                if !present.insert(hit.path.clone()) {
+                    continue;
+                }
+                extra_idx += 1;
+                let fts_norm = 1.0 / (1.0 + extra_idx as f64);
+                extra.extend(fts_spans_for_hit(&store, &hit, fts_norm, &plan, &qtokens)?);
+            }
+        }
+        for s in &mut extra {
+            if qtokens.iter().any(|t| stem_matches_token(&s.path, t)) {
+                s.why.insert("path_basename".into());
+            }
+            rescore(s, &plan.path_hints, &top_files);
+        }
+        first_pass.extend(extra);
+        first_pass.sort_by(|a, b| cmp_score_desc(a, b));
+        let mut per_path: HashMap<String, usize> = HashMap::new();
+        let mut rescued = Vec::new();
+        for s in first_pass {
+            let n = per_path.entry(s.path.clone()).or_insert(0);
+            if *n < 2 {
+                *n += 1;
+                rescued.push(s);
+            }
+        }
+        first_pass = rescued;
     }
 
     let mut items = Vec::new();
@@ -462,6 +468,67 @@ fn basename_tokens(plan: &QueryPlan) -> Vec<String> {
     out
 }
 
+fn span_matches_query(span: &SpanCand, tokens: &[String]) -> bool {
+    tokens.iter().any(|t| {
+        stem_matches_token(&span.path, t)
+            || span
+                .symbol
+                .as_ref()
+                .is_some_and(|n| n.to_ascii_lowercase().contains(&t.to_ascii_lowercase()))
+    })
+}
+
+fn fts_spans_for_hit(
+    store: &Store,
+    hit: &FtsHit,
+    fts_norm: f64,
+    plan: &QueryPlan,
+    match_terms: &[String],
+) -> Result<Vec<SpanCand>, Error> {
+    let file_syms = store.lookup_symbols_in_path(&hit.path, CAP_SYMBOLS)?;
+    let mut out = Vec::new();
+    for h in &file_syms {
+        if h.kind == SymbolKind::Heading || h.kind == SymbolKind::Selector {
+            continue;
+        }
+        if !match_terms.iter().any(|t| {
+            h.name.eq_ignore_ascii_case(t)
+                || h.name
+                    .to_ascii_lowercase()
+                    .contains(&t.to_ascii_lowercase())
+        }) {
+            continue;
+        }
+        let exact = plan
+            .symbol_terms
+            .iter()
+            .any(|t| h.name.eq_ignore_ascii_case(t));
+        let mut why = why_for_symbol(h, exact);
+        why.insert("fts".into());
+        let mut span = span_from_symbol(h, why);
+        span.fts_norm = fts_norm;
+        out.push(span);
+    }
+    if out.is_empty() {
+        let mut why = BTreeSet::new();
+        why.insert("fts".into());
+        out.push(SpanCand {
+            path: hit.path.clone(),
+            start_line: 1,
+            end_line: FTS_SPAN_LINES,
+            symbol: None,
+            kind: None,
+            why,
+            fts_norm,
+            neighbor_high: false,
+            neighbor_low: false,
+            score: 0.0,
+            prequoted: None,
+        });
+    }
+    Ok(out)
+}
+
 fn is_symbol_term(token: &str) -> bool {
     if token.is_empty() {
         return false;
@@ -491,6 +558,23 @@ fn push_unique(out: &mut Vec<String>, item: String) {
     if !out.iter().any(|e| e == &item) {
         out.push(item);
     }
+}
+
+fn fts_rescue_terms(tokens: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in tokens {
+        if t.contains('-') || t.contains('_') {
+            for part in t.split(|c: char| c == '_' || c == '-') {
+                if part.is_empty() || is_stopword(part) {
+                    continue;
+                }
+                push_unique(&mut out, part.to_string());
+            }
+        } else if !is_stopword(t) {
+            push_unique(&mut out, t.clone());
+        }
+    }
+    out
 }
 
 fn collect_fts(store: &Store, plan: &QueryPlan) -> Result<Vec<FtsHit>, Error> {
@@ -1371,5 +1455,45 @@ fn rescore_path_basename_beats_fts_only() {
         "basename+fts {} vs fts-only {}",
         trash.score,
         ui.score
+    );
+}
+
+#[test]
+fn span_matches_query_uses_stem_or_symbol() {
+    let mut why = BTreeSet::new();
+    why.insert("fts".into());
+    let span = SpanCand {
+        path: "pdf_thumbnail.ts".into(),
+        start_line: 1,
+        end_line: 4,
+        symbol: Some("renderPdfThumbnail".into()),
+        kind: Some("function".into()),
+        why,
+        fts_norm: 1.0,
+        neighbor_high: false,
+        neighbor_low: false,
+        score: 0.0,
+        prequoted: None,
+    };
+    let tokens = vec!["trash".into()];
+    assert!(!span_matches_query(&span, &tokens));
+    let tokens = vec!["thumbnail".into()];
+    assert!(span_matches_query(&span, &tokens));
+}
+
+#[test]
+fn fts_rescue_terms_splits_hyphen_and_underscore() {
+    assert_eq!(
+        fts_rescue_terms(&[
+            "does".into(),
+            "trash".into(),
+            "soft-delete".into(),
+            "work".into()
+        ]),
+        vec!["does", "trash", "soft", "delete", "work"]
+    );
+    assert_eq!(
+        fts_rescue_terms(&["TRASH_RETENTION_DAYS".into()]),
+        vec!["TRASH", "RETENTION", "DAYS"]
     );
 }
