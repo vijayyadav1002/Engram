@@ -39,6 +39,7 @@ Pass if `used_tokens ≤ 3000` on the ranking queries.
 ## Local MDA eval (not CI)
 
 Repo: `/Users/vijay/Projects/mda`. Default budget 3000.
+Archive: ~/.mempalace/palace.archive-20260910
 
 | Query | Must include | Must not include |
 |---|---|---|
