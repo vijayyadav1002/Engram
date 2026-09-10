@@ -133,8 +133,41 @@ pub fn get_context_with(
         spans.push(span);
     }
 
+    let btoks = basename_tokens(&plan);
+    let mut fts_terms = plan.symbol_terms.clone();
+    for w in plan.fts_query.split_whitespace() {
+        push_unique(&mut fts_terms, w.to_string());
+    }
+
     for (idx, hit) in fts_hits.iter().enumerate() {
         let fts_norm = 1.0 / (1.0 + idx as f64);
+        let file_syms = store.lookup_symbols_in_path(&hit.path, CAP_SYMBOLS)?;
+        let mut promoted = 0usize;
+        for h in &file_syms {
+            if h.kind == SymbolKind::Heading || h.kind == SymbolKind::Selector {
+                continue;
+            }
+            let contains = fts_terms.iter().any(|t| {
+                h.name.eq_ignore_ascii_case(t)
+                    || h.name.to_ascii_lowercase().contains(&t.to_ascii_lowercase())
+            });
+            if !contains {
+                continue;
+            }
+            let exact = plan
+                .symbol_terms
+                .iter()
+                .any(|t| h.name.eq_ignore_ascii_case(t));
+            let mut why = why_for_symbol(h, exact);
+            why.insert("fts".into());
+            let mut span = span_from_symbol(h, why);
+            span.fts_norm = fts_norm;
+            spans.push(span);
+            promoted += 1;
+        }
+        if promoted > 0 {
+            continue;
+        }
         if let Some(heading) = heading_in_file(&store, &hit.path, &terms_for_heading, &symbol_hits)?
         {
             let mut why = BTreeSet::new();
@@ -225,7 +258,6 @@ pub fn get_context_with(
         .filter(|s| s.why.contains("exact_symbol"))
         .map(|s| s.path.clone())
         .collect();
-    let btoks = basename_tokens(&plan);
     for s in &mut fused {
         if btoks.iter().any(|t| stem_matches_token(&s.path, t)) {
             s.why.insert("path_basename".into());

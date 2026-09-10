@@ -1,0 +1,91 @@
+use engram::compile::get_context;
+use engram::index::index_repo;
+use engram::store::Store;
+use std::fs;
+use std::path::PathBuf;
+
+fn unique_name() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}-{}-{}",
+        std::process::id(),
+        n,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
+
+fn trash_fixture() -> PathBuf {
+    let root = std::env::temp_dir().join(format!("engram-rank-{}", unique_name()));
+    fs::create_dir_all(root.join("services")).unwrap();
+    fs::create_dir_all(root.join("docs/adrs")).unwrap();
+    fs::create_dir_all(root.join(".engram")).unwrap();
+    fs::write(
+        root.join("services/trash.ts"),
+        "/** soft-delete trash items; retention purge */\n\
+         export type TrashItemRow = { id: string };\n\
+         export function purgeTrash() { return 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("config.ts"),
+        "export const TRASH_RETENTION_DAYS = 30;\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("RemoveTagsDialog.tsx"),
+        "export function RemoveTagsDialog() {\n\
+         // delete tags; soft delete retention policy for tags\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("pdf_thumbnail.ts"),
+        "export function renderPdfThumbnail() {\n\
+         // cache retention of rendered pages\n\
+         return 0\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/adrs/ADR-001-trash.md"),
+        "# ADR-001 Trash\n\n## Decision\n\nKeep trash for TRASH_RETENTION_DAYS then purge.\n",
+    )
+    .unwrap();
+    Store::create(&root.join(".engram/index.sqlite"), root.to_str().unwrap()).unwrap();
+    root
+}
+
+#[allow(dead_code)] // Task 5 golden queries
+fn has_path(pkg: &engram::types::ContextPackage, suffix: &str) -> bool {
+    pkg.items.iter().any(|i| i.path.ends_with(suffix))
+}
+
+#[test]
+fn fts_promotes_trash_item_row_not_only_file_snippet() {
+    let root = trash_fixture();
+    index_repo(&root, true).unwrap();
+    let pkg = get_context(&root, "trash retention", 3000).unwrap();
+    assert!(
+        pkg.items.iter().any(|i| {
+            i.path.ends_with("services/trash.ts")
+                && (i.symbol.as_deref() == Some("TrashItemRow")
+                    || i.symbol.as_deref() == Some("purgeTrash"))
+        }),
+        "expected TrashItemRow or purgeTrash, got {:?}",
+        pkg.items
+            .iter()
+            .map(|i| (i.path.clone(), i.symbol.clone()))
+            .collect::<Vec<_>>()
+    );
+    assert!(pkg.used_tokens <= 3000);
+    assert!(pkg
+        .items
+        .iter()
+        .all(|i| i.kind.as_deref() != Some("palace")));
+}
