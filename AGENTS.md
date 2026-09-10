@@ -20,7 +20,7 @@ The goal is a small, accurate answer:
 |---|---|---|
 | Where / how is this implemented? What does this file/symbol do? | Engram `get_context` (palace off) | If `items` is empty or `stats.stale_index` is true: `search_symbols` / `search_code`, then grep / `engram index`. Do not open palace. |
 | What did we decide? What happened last session? Who is X? | `mempalace_search` with **explicit `wing`** (`palace_wing` from `.engram/config.toml`, or `engram` / `mda`) | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: “palace has nothing.” Do not paraphrase. If KG has no triples, say the KG is empty. |
-| Why did we choose X? Why this architecture? | `get_context` first (code; `kind=commit` / `kind=decision` when present) | Until palace attach is scoped (`palace_wing` + cosine floor in Engram), use scoped `mempalace_search` — do **not** set `include_palace`. After that ships, `include_palace: true` is allowed. If code and palace conflict, say **the code has moved on** and cite both. |
+| Why did we choose X? Why this architecture? | `get_context` first (code; `kind=commit` / `kind=decision` when present) | `include_palace: true` is allowed. Palace items require `palace_wing` and cosine ≥ 0.6. If code and palace conflict, say **the code has moved on** and cite both. Use `mempalace_search` if you need more than the attached drawers. |
 
 ## Engram rules
 

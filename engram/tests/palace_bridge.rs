@@ -116,7 +116,7 @@ fn fake_three_drawers_budget_keeps_two() {
             room: format!("r{i}"),
             source: "s".into(),
             text: drawer_text.clone(),
-            cosine: None,
+            cosine: Some(0.8),
         })
         .collect();
     let fake = Arc::new(FakePalaceSearch {
@@ -248,4 +248,105 @@ fn missing_wing_is_unscoped_disabled_and_does_not_search() {
         .items
         .iter()
         .all(|i| i.kind.as_deref() != Some("palace")));
+}
+
+#[test]
+fn low_cosine_is_below_threshold() {
+    let root = repo();
+    index_repo(&root, true).unwrap();
+    write_wing(&root, "mda");
+    let fake = Arc::new(FakePalaceSearch {
+        drawers: vec![PalaceDrawer {
+            wing: "mda".into(),
+            room: "decisions".into(),
+            source: "s".into(),
+            text: "session dump should not attach".into(),
+            cosine: Some(0.34),
+        }],
+        error: None,
+    });
+    let pkg = get_context_with(
+        &root,
+        "createSession",
+        3000,
+        GetContextOpts {
+            include_palace: Some(true),
+            palace_search: Some(fake),
+        },
+    )
+    .unwrap();
+    let p = pkg.stats.palace.unwrap();
+    assert_eq!(p.status, "below_threshold");
+    assert_eq!(p.attempted, 1);
+    assert_eq!(p.included, 0);
+    assert!(pkg
+        .items
+        .iter()
+        .all(|i| i.kind.as_deref() != Some("palace")));
+}
+
+#[test]
+fn missing_cosine_is_below_threshold() {
+    let root = repo();
+    index_repo(&root, true).unwrap();
+    write_wing(&root, "mda");
+    let fake = Arc::new(FakePalaceSearch {
+        drawers: vec![PalaceDrawer {
+            wing: "mda".into(),
+            room: "decisions".into(),
+            source: "s".into(),
+            text: "no score".into(),
+            cosine: None,
+        }],
+        error: None,
+    });
+    let pkg = get_context_with(
+        &root,
+        "createSession",
+        3000,
+        GetContextOpts {
+            include_palace: Some(true),
+            palace_search: Some(fake),
+        },
+    )
+    .unwrap();
+    assert_eq!(pkg.stats.palace.unwrap().status, "below_threshold");
+    assert!(pkg
+        .items
+        .iter()
+        .all(|i| i.kind.as_deref() != Some("palace")));
+}
+
+#[test]
+fn high_cosine_attaches_palace_path() {
+    let root = repo();
+    index_repo(&root, true).unwrap();
+    write_wing(&root, "mda");
+    let fake = Arc::new(FakePalaceSearch {
+        drawers: vec![PalaceDrawer {
+            wing: "mda".into(),
+            room: "decisions".into(),
+            source: "adr.md".into(),
+            text: "Keep trash 30 days.".into(),
+            cosine: Some(0.72),
+        }],
+        error: None,
+    });
+    let pkg = get_context_with(
+        &root,
+        "createSession",
+        3000,
+        GetContextOpts {
+            include_palace: Some(true),
+            palace_search: Some(fake),
+        },
+    )
+    .unwrap();
+    let p = pkg.stats.palace.unwrap();
+    assert_eq!(p.status, "ok");
+    assert_eq!(p.included, 1);
+    assert!(pkg
+        .items
+        .iter()
+        .any(|i| i.path == "palace://mda/decisions" && i.why.iter().any(|w| w == "palace")));
 }

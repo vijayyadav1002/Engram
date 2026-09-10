@@ -1252,11 +1252,25 @@ fn attach_palace(
             pkg.stats.palace = Some(palace_stats("unparseable"));
         }
         Ok(drawers) => {
-            let drawers: Vec<_> = drawers.into_iter().take(PALACE_MAX_HITS).collect();
-            let attempted = drawers.len() as u32;
+            let min_cos = file_cfg.min_cosine;
+            let attempted = drawers.len().min(PALACE_MAX_HITS) as u32;
+            let passed: Vec<_> = drawers
+                .into_iter()
+                .take(PALACE_MAX_HITS)
+                .filter(|d| d.cosine.is_some_and(|c| c >= min_cos))
+                .collect();
+            if passed.is_empty() {
+                pkg.stats.palace = Some(PalaceStats {
+                    status: "below_threshold".into(),
+                    attempted,
+                    included: 0,
+                    dropped_for_budget: 0,
+                });
+                return;
+            }
             let mut included = 0u32;
             let mut dropped_for_budget = 0u32;
-            for d in drawers {
+            for d in passed {
                 let text = truncate_drawer_text(&d.text);
                 let cost = token_cost(&text);
                 let item = ContextItem {
