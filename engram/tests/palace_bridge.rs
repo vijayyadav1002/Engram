@@ -1,9 +1,10 @@
 use engram::compile::{get_context, get_context_with, GetContextOpts};
 use engram::index::index_repo;
-use engram::palace::{FakePalaceSearch, PalaceDrawer, PalaceError};
+use engram::palace::{FakePalaceSearch, PalaceDrawer, PalaceError, PalaceSearch};
 use engram::store::Store;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 fn repo() -> PathBuf {
@@ -38,6 +39,32 @@ fn est_token_cost(text: &str) -> u32 {
     text.split_whitespace().count() as u32 + 2
 }
 
+struct CountingSearch {
+    inner: FakePalaceSearch,
+    calls: Arc<AtomicUsize>,
+}
+
+impl PalaceSearch for CountingSearch {
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        wing: Option<&str>,
+        room: Option<&str>,
+    ) -> Result<Vec<PalaceDrawer>, PalaceError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.search(query, limit, wing, room)
+    }
+}
+
+fn write_wing(root: &std::path::Path, wing: &str) {
+    std::fs::write(
+        root.join(".engram/config.toml"),
+        format!("palace_wing = \"{wing}\"\n"),
+    )
+    .unwrap();
+}
+
 #[test]
 fn disabled_omits_palace_key() {
     let root = repo();
@@ -55,6 +82,7 @@ fn disabled_omits_palace_key() {
 fn missing_searcher_sets_not_installed() {
     let root = repo();
     index_repo(&root, true).unwrap();
+    write_wing(&root, "w");
     let fake = Arc::new(FakePalaceSearch {
         drawers: vec![],
         error: Some(PalaceError::NotInstalled),
@@ -80,6 +108,7 @@ fn missing_searcher_sets_not_installed() {
 fn fake_three_drawers_budget_keeps_two() {
     let root = repo();
     index_repo(&root, true).unwrap();
+    write_wing(&root, "w");
     let drawer_text = "word ".repeat(80);
     let drawers: Vec<PalaceDrawer> = (0..3)
         .map(|i| PalaceDrawer {
@@ -131,6 +160,7 @@ fn fake_three_drawers_budget_keeps_two() {
 fn timeout_keeps_code_items() {
     let root = repo();
     index_repo(&root, true).unwrap();
+    write_wing(&root, "w");
     let fake = Arc::new(FakePalaceSearch {
         drawers: vec![],
         error: Some(PalaceError::Timeout),
@@ -153,6 +183,7 @@ fn timeout_keeps_code_items() {
 fn remaining_below_min_skips_searcher() {
     let root = repo();
     index_repo(&root, true).unwrap();
+    write_wing(&root, "w");
     let code = get_context(&root, "createSession", 3000).unwrap();
     let budget = code.used_tokens + 50;
     let fake = Arc::new(FakePalaceSearch {
@@ -174,6 +205,45 @@ fn remaining_below_min_skips_searcher() {
     assert_eq!(p.attempted, 0);
     assert_eq!(p.included, 0);
     assert_eq!(p.dropped_for_budget, 0);
+    assert!(pkg
+        .items
+        .iter()
+        .all(|i| i.kind.as_deref() != Some("palace")));
+}
+
+#[test]
+fn missing_wing_is_unscoped_disabled_and_does_not_search() {
+    let root = repo();
+    index_repo(&root, true).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fake = Arc::new(CountingSearch {
+        inner: FakePalaceSearch {
+            drawers: vec![PalaceDrawer {
+                wing: "sessions".into(),
+                room: "technical".into(),
+                source: "s".into(),
+                text: "should not attach".into(),
+                cosine: Some(0.9),
+            }],
+            error: None,
+        },
+        calls: calls.clone(),
+    });
+    let pkg = get_context_with(
+        &root,
+        "createSession",
+        3000,
+        GetContextOpts {
+            include_palace: Some(true),
+            palace_search: Some(fake),
+        },
+    )
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        pkg.stats.palace.as_ref().unwrap().status,
+        "unscoped_disabled"
+    );
     assert!(pkg
         .items
         .iter()

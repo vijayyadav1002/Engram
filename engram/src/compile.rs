@@ -2,8 +2,9 @@ use crate::error::Error;
 use crate::git::{COMMIT_FTS_CAP, DECISION_SYMBOL_CAP, SUPERSEDES_NEIGHBOR_CAP};
 use crate::hash::blake3_file;
 use crate::palace::{
-    default_bin, read_config_text, resolve_opt_in, truncate_drawer_text, CliPalaceSearch,
-    PalaceError, PalaceSearch, PALACE_MAX_HITS, PALACE_MIN_REMAINING, PALACE_TIMEOUT_MS,
+    default_bin, parse_palace_file_config, read_config_text, resolve_opt_in, truncate_drawer_text,
+    CliPalaceSearch, PalaceError, PalaceSearch, PALACE_MAX_HITS, PALACE_MIN_REMAINING,
+    PALACE_TIMEOUT_MS,
 };
 use crate::store::{CommitHit, FtsHit, NeighborHit, Store, SymbolHit};
 use crate::types::{
@@ -1222,6 +1223,12 @@ fn attach_palace(
         pkg.stats.palace = Some(palace_stats("ok"));
         return;
     }
+    let file_cfg = parse_palace_file_config(cfg.as_deref().unwrap_or(""));
+    let wing = file_cfg.wing.filter(|w| !w.is_empty());
+    if wing.is_none() {
+        pkg.stats.palace = Some(palace_stats("unscoped_disabled"));
+        return;
+    }
     let searcher = opts.palace_search.clone().unwrap_or_else(|| {
         Arc::new(CliPalaceSearch {
             bin: default_bin(),
@@ -1229,7 +1236,12 @@ fn attach_palace(
             timeout_ms: PALACE_TIMEOUT_MS,
         })
     });
-    match searcher.search(query, PALACE_MAX_HITS) {
+    match searcher.search(
+        query,
+        PALACE_MAX_HITS,
+        wing.as_deref(),
+        file_cfg.room.as_deref(),
+    ) {
         Err(PalaceError::NotInstalled) => {
             pkg.stats.palace = Some(palace_stats("not_installed"));
         }

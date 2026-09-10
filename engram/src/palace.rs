@@ -78,10 +78,7 @@ pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
                         continue;
                     }
                     in_body = true;
-                    let start = nt
-                        .strip_prefix('→')
-                        .map(str::trim_start)
-                        .unwrap_or(nt);
+                    let start = nt.strip_prefix('→').map(str::trim_start).unwrap_or(nt);
                     body.push_str(start);
                     i += 1;
                     continue;
@@ -93,10 +90,7 @@ pub fn parse_search_output(stdout: &str) -> Vec<PalaceDrawer> {
                 if !body.is_empty() {
                     body.push('\n');
                 }
-                let piece = nt
-                    .strip_prefix('→')
-                    .map(str::trim_start)
-                    .unwrap_or(nt);
+                let piece = nt.strip_prefix('→').map(str::trim_start).unwrap_or(nt);
                 body.push_str(piece);
                 i += 1;
             }
@@ -160,7 +154,37 @@ pub enum PalaceError {
 }
 
 pub trait PalaceSearch: Send + Sync {
-    fn search(&self, query: &str, limit: usize) -> Result<Vec<PalaceDrawer>, PalaceError>;
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        wing: Option<&str>,
+        room: Option<&str>,
+    ) -> Result<Vec<PalaceDrawer>, PalaceError>;
+}
+
+/// `mempalace search --results N [--wing W] [--room R] <truncated query>`.
+pub fn search_argv(
+    query: &str,
+    limit: usize,
+    wing: Option<&str>,
+    room: Option<&str>,
+) -> Vec<String> {
+    let mut argv = vec![
+        "search".to_string(),
+        "--results".to_string(),
+        limit.to_string(),
+    ];
+    if let Some(w) = wing {
+        argv.push("--wing".to_string());
+        argv.push(w.to_string());
+    }
+    if let Some(r) = room {
+        argv.push("--room".to_string());
+        argv.push(r.to_string());
+    }
+    argv.push(truncate_query(query));
+    argv
 }
 
 #[derive(Debug, Clone)]
@@ -237,7 +261,13 @@ pub fn wait_with_timeout(
 }
 
 impl PalaceSearch for FakePalaceSearch {
-    fn search(&self, _query: &str, _limit: usize) -> Result<Vec<PalaceDrawer>, PalaceError> {
+    fn search(
+        &self,
+        _query: &str,
+        _limit: usize,
+        _wing: Option<&str>,
+        _room: Option<&str>,
+    ) -> Result<Vec<PalaceDrawer>, PalaceError> {
         match &self.error {
             Some(err) => Err(err.clone()),
             None => Ok(self.drawers.clone()),
@@ -246,15 +276,16 @@ impl PalaceSearch for FakePalaceSearch {
 }
 
 impl PalaceSearch for CliPalaceSearch {
-    fn search(&self, query: &str, limit: usize) -> Result<Vec<PalaceDrawer>, PalaceError> {
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        wing: Option<&str>,
+        room: Option<&str>,
+    ) -> Result<Vec<PalaceDrawer>, PalaceError> {
         let limit = limit.min(PALACE_MAX_HITS);
         let mut child = match Command::new(&self.bin)
-            .args([
-                "search",
-                "--results",
-                &limit.to_string(),
-                &truncate_query(query),
-            ])
+            .args(search_argv(query, limit, wing, room))
             .current_dir(&self.cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -476,7 +507,10 @@ mod tests {
             "body was {:?}",
             hits[0].text
         );
-        assert!(hits[0].text.contains('}'), "JSON fragment brace is drawer text");
+        assert!(
+            hits[0].text.contains('}'),
+            "JSON fragment brace is drawer text"
+        );
         assert_eq!(hits[1].source, "segment_000.md");
         assert!(hits[1].text.contains("TSX extractor"));
         assert_eq!(hits[0].cosine, Some(0.686));
@@ -553,7 +587,7 @@ mod tests {
             }],
             error: None,
         };
-        let hits = fake.search("q", 3).unwrap();
+        let hits = fake.search("q", 3, None, None).unwrap();
         assert_eq!(hits[0].text, "hello");
     }
 
@@ -564,7 +598,7 @@ mod tests {
             error: Some(PalaceError::NotInstalled),
         };
         assert!(matches!(
-            fake.search("q", 3),
+            fake.search("q", 3, None, None),
             Err(PalaceError::NotInstalled)
         ));
     }
@@ -576,7 +610,10 @@ mod tests {
             cwd: std::env::temp_dir(),
             timeout_ms: 500,
         };
-        assert!(matches!(cli.search("q", 3), Err(PalaceError::NotInstalled)));
+        assert!(matches!(
+            cli.search("q", 3, None, None),
+            Err(PalaceError::NotInstalled)
+        ));
     }
 
     #[test]
@@ -598,7 +635,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("sleep_search");
-        fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
+        fs::write(&bin, "#!/bin/sh\nexec sleep 5\n").unwrap();
         let mut perms = fs::metadata(&bin).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&bin, perms).unwrap();
@@ -609,7 +646,10 @@ mod tests {
             timeout_ms: 200,
         };
         let started = std::time::Instant::now();
-        assert!(matches!(cli.search("q", 3), Err(PalaceError::Timeout)));
+        assert!(matches!(
+            cli.search("q", 3, None, None),
+            Err(PalaceError::Timeout)
+        ));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
             "timeout should kill the child instead of waiting out sleep 5"
@@ -637,7 +677,10 @@ mod tests {
             cwd: std::env::temp_dir(),
             timeout_ms: 500,
         };
-        assert!(matches!(cli.search("q", 3), Err(PalaceError::Unparseable)));
+        assert!(matches!(
+            cli.search("q", 3, None, None),
+            Err(PalaceError::Unparseable)
+        ));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -653,7 +696,11 @@ mod tests {
 
     #[test]
     fn explicit_false_wins() {
-        assert!(!resolve_opt_in(Some(false), Some("1"), Some("palace = true\n")));
+        assert!(!resolve_opt_in(
+            Some(false),
+            Some("1"),
+            Some("palace = true\n")
+        ));
     }
 
     #[test]
@@ -669,5 +716,33 @@ mod tests {
     #[test]
     fn env_one_enables() {
         assert!(resolve_opt_in(None, Some("1"), None));
+    }
+
+    #[test]
+    fn search_argv_includes_wing_and_room() {
+        let argv = search_argv("why trash", 3, Some("mda"), Some("decisions"));
+        assert_eq!(
+            argv,
+            vec![
+                "search",
+                "--results",
+                "3",
+                "--wing",
+                "mda",
+                "--room",
+                "decisions",
+                "why trash",
+            ]
+        );
+    }
+
+    #[test]
+    fn search_argv_omits_room_when_none() {
+        let argv = search_argv("q", 3, Some("engram"), None);
+        assert_eq!(
+            argv,
+            vec!["search", "--results", "3", "--wing", "engram", "q"]
+        );
+        assert!(!argv.iter().any(|a| a == "--room"));
     }
 }
