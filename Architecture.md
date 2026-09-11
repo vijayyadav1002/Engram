@@ -146,20 +146,23 @@ Pure read. Default budget **3000 tokens**. Serialized JSON cap **16 384 bytes*
 
 ```
 query
-  → plan_query          (no LLM)
+  → plan_query          (no LLM; token classes unchanged)
   → symbol hits (cap 50)
-  → FTS hits    (cap 30 files)
+  → FTS hits    (cap 30 files; hyphen/underscore OR fallback in fts_try)
+  → promote matching file symbols on each FTS hit (else heading, else 40-line snippet)
   → 1-hop neighbors of accepted symbols (cap 40; high first, then low)
   → decision symbols (cap 10) + supersedes neighbors (cap 10)
   → commit FTS + subject-token match (cap 20; subject hits kept even if FTS is full)
   → fuse identical (path, start, end)
+  → tag path_basename when the file stem matches a query token
   → score
   → merge overlapping spans; keep tighter symbol span inside an FTS hit
   → first pass: at most 2 spans per file; overflow if budget remains
+  → low-signal rescue: if no first-pass span matches, splice leftover FTS hits
   → re-read disk + Blake3 for file/ADR spans; omit stale
   → git:// items use stored subject+body (no hash re-read)
   → pack until token budget, then JSON cap
-  → optional palace attachment
+  → optional palace attachment (wing + cosine floor)
 ```
 
 ### 7.1 Query plan
@@ -180,6 +183,7 @@ Sum of weights. No learned model.
 |---|---|
 | Exact symbol name | +5.0 |
 | Prefix symbol | +3.0 |
+| Path basename (`path_basename`) | +3.0 (same band as prefix). File stem equals a query token, or starts with `token_` / `token-` (ASCII case-insensitive). Not a substring (`mytrash.ts` does not match `trash`). Lowercase tokens stay FTS; they are not path hints. |
 | FTS | +2.0 × reciprocal rank (`1 / (1 + hit_index)`). SQLite FTS5 BM25 orders the hits; the compiler does not ingest the raw BM25 value |
 | Heading or selector | +2.0 |
 | High-confidence neighbor | +1.5 |
@@ -189,11 +193,13 @@ Sum of weights. No learned model.
 | Commit FTS | +2.0 × reciprocal rank |
 | Commit path overlap (`commit_path`) | +1.0 |
 
-Exact/prefix **decision** names reuse the +5 / +3 symbol weights (also tagged `decision`). No extra boost for the word “why”. Git and ADRs compete with code for the same budget. Palace still attaches last, only if opted in.
+Exact/prefix **decision** names reuse the +5 / +3 symbol weights (also tagged `decision`). No extra boost for the word “why”. Git and ADRs compete with code for the same budget. Palace still attaches last, only if opted in, a wing is set, and cosine ≥ `palace_min_cosine` (default 0.6).
+
+FTS hits whose file has a symbol whose name contains a basename/FTS/symbol token emit **those symbol spans** (with `fts` plus `exact_symbol` / `prefix_symbol`) instead of the generic 1–40-line snippet. Combined FTS AND / hyphen-as-NOT can miss files; `fts_try` then unions a hyphen/underscore **OR** query under the same `CAP_FTS`. If no first-pass span matches the query (stem or symbol substring), leftover FTS hits are spliced, promoted the same way, rescored, and recapped at 2 spans per path.
 
 Git item: `path` = `git://<full sha>`, `kind` = `commit`, `symbol` = 7-char sha, `text` = `{subject}\n\n{body}`. ADR item: real file path, `kind` = `decision`, disk re-read like code. `commit_files` never become items.
 
-`why` tags on items: `exact_symbol`, `prefix_symbol`, `fts`, `import_neighbor`, `call_neighbor`, `heading`, `selector`, `path_hint`, `commit`, `commit_fts`, `commit_path`, `decision`, `supersedes_neighbor`, and optionally `palace`.
+`why` tags on items: `exact_symbol`, `prefix_symbol`, `path_basename`, `fts`, `import_neighbor`, `call_neighbor`, `heading`, `selector`, `path_hint`, `commit`, `commit_fts`, `commit_path`, `decision`, `supersedes_neighbor`, and optionally `palace`.
 
 Bare FTS hits with no heading become a span of the first **40 lines** of the file.
 
@@ -284,12 +290,15 @@ Same argv everywhere: `engram` `["mcp"]`. `--skill` writes `.grok/skills/engram/
 Off by default. After the code package is packed, Engram may attach up to **3 verbatim drawers** if:
 
 1. Caller opted in: MCP `include_palace: true` / CLI `--palace`, else `ENGRAM_PALACE=1`, else `.engram/config.toml` `palace = true`. Explicit disable always wins.
-2. `mempalace` is on `PATH` (or `ENGRAM_PALACE_BIN`).
-3. Remaining token budget ≥ 200 (`PALACE_MIN_REMAINING`).
+2. `.engram/config.toml` has a non-empty `palace_wing`. Missing/empty wing → `stats.palace.status = unscoped_disabled` and **return without calling** the searcher. Never retry unscoped.
+3. `mempalace` is on `PATH` (or `ENGRAM_PALACE_BIN`).
+4. Remaining token budget ≥ 200 (`PALACE_MIN_REMAINING`).
 
-It spawns `mempalace search --results 3 <query>` in the repo root (timeout 8s). Palace failure or absence never fails `get_context`. Drawers do not participate in symbol ranking or stale-hash checks. Each body is truncated at 1200 characters.
+It spawns `mempalace search --results 3 --wing <wing> [--room <room>] <query>` in the repo root (timeout 8s). Cosine is CLI **similarity** (higher is better), default floor `palace_min_cosine = 0.6`. Drop a drawer when `cosine` is `None` or `< min_cosine`. If every hit is dropped: no palace items, `status = below_threshold`, `attempted` = pre-filter count (max 3), `included = 0`. Empty CLI parse is still `unparseable` (before the floor). Palace failure or absence never fails `get_context`. Drawers do not participate in symbol ranking or stale-hash checks. Each body is truncated at 1200 characters.
 
 Palace items reuse `ContextItem`: `path` is `palace://{wing}/{room}`, `kind` is `palace`, `why` contains `palace`. Code items keep budget priority. If code and palace disagree, **current code wins**.
+
+Config keys (line-oriented; last assignment wins): `palace`, `palace_wing`, `palace_room`, `palace_min_cosine`. Trimmed empty wing/room → omitted. Cosine outside `0.0..=2.0` is ignored (keep default 0.6). This repo’s tracked config is `palace = false` with `palace_wing = "engram"`.
 
 ## 11. CLI
 
@@ -332,6 +341,7 @@ Retrieval caps keep the query path O(candidates). MCP does not preload the graph
 - Tree-sitter graphs for Rust, Go, and other non-listed languages
 - Multi-repo search (one index per repo root)
 - Writing to MemPalace from `get_context`
+- Unscoped palace search from `get_context` (missing `palace_wing` is `unscoped_disabled`, not a retry)
 
 ## 14. Related documents
 
@@ -339,5 +349,6 @@ Retrieval caps keep the query path O(candidates). MCP does not preload the graph
 - [`docs/superpowers/specs/2026-09-08-engram-mempalace-bridge-design.md`](docs/superpowers/specs/2026-09-08-engram-mempalace-bridge-design.md) — palace attachment
 - [`docs/superpowers/specs/2026-09-08-engram-palace-cli-compat-design.md`](docs/superpowers/specs/2026-09-08-engram-palace-cli-compat-design.md) — MemPalace 3.3.x CLI parse
 - [`docs/superpowers/specs/2026-09-08-engram-git-decisions-design.md`](docs/superpowers/specs/2026-09-08-engram-git-decisions-design.md) — git commits + ADR extract
+- [`docs/superpowers/specs/2026-09-10-engram-mempalace-optimization-design.md`](docs/superpowers/specs/2026-09-10-engram-mempalace-optimization-design.md) — ranking, fail-closed attach, protocol
 - [`README.md`](README.md) — install and usage
 - [`AGENTS.md`](AGENTS.md) — agent router (code vs palace)

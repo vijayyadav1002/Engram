@@ -123,7 +123,7 @@ That prints a budgeted digest of quoted source. JSON:
 engram get-context "where is authentication handled?" --json --budget 3000
 ```
 
-To also attach up to three [MemPalace](https://github.com/MemPalace/mempalace) drawers in the same package (off by default):
+To also attach up to three [MemPalace](https://github.com/MemPalace/mempalace) drawers in the same package (off by default; requires `palace_wing` and cosine ≥ 0.6 — see below):
 
 ```bash
 engram get-context "why did we choose WebSockets?" --palace
@@ -259,11 +259,11 @@ Engram does **not** store conversations. For Grok, a user-level Stop/SessionEnd 
 
 The default integration is two MCP servers plus a router. `engram init --skill --write-agents` writes that router into `AGENTS.md` and `.grok/skills/engram/SKILL.md`.
 
-| Question | First tool |
-|---|---|
-| Where / how is this implemented? | Engram `get_context` |
-| What did we decide in chat? Last session? Who? | MemPalace `mempalace_search` |
-| Why did we choose X? | `get_context` (commit messages and ADRs may already be in the package). Add `include_palace: true` for **conversation** memory. **Code wins** if they disagree. |
+| Question | First tool | Then |
+|---|---|---|
+| Where / how is this implemented? | Engram `get_context` (palace off) | If `items` is empty or `stale_index`: `search_symbols` / `search_code`, then grep / `engram index`. Do not open palace. |
+| What did we decide in chat? Last session? Who? | MemPalace `mempalace_search` with an **explicit `wing`** | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: palace has nothing. |
+| Why did we choose X? | `get_context` first (code; `kind=commit` / `kind=decision` when present) | `include_palace: true` is allowed. Palace items require `palace_wing` and cosine ≥ 0.6. If they disagree, **the code has moved on**. |
 
 ```bash
 # in your app
@@ -274,9 +274,9 @@ engram index
 
 ### Optional: attach drawers on `get_context`
 
-After the code package is compiled, Engram can append up to three **verbatim** MemPalace drawers if you opt in and `mempalace` is on `PATH`. Code spans are compiled first and keep the budget. Palace absence, timeout, or parse failure never fails `get_context`.
+After the code package is compiled, Engram can append up to three **verbatim** MemPalace drawers if you opt in, `mempalace` is on `PATH`, and `.engram/config.toml` names a **`palace_wing`**. Code spans are compiled first and keep the budget. Missing/empty wing → `stats.palace.status = unscoped_disabled` and **no search**. Unscoped `mempalace search` from Engram is forbidden. Palace absence, timeout, or parse failure never fails `get_context`.
 
-Engram parses MemPalace **3.3.x** `search` CLI text (`[N] wing / room`, then `Source:` / `Match:`, then the indented body). There is no `search --json` flag in that release. If `stats.palace.status` is `unparseable`, the CLI format changed — file a fixture, do not grep the tree as a substitute for `get_context`.
+Engram parses MemPalace CLI `search` text (`[N] wing / room`, then `Source:` / `Match:`, then the indented body), including `cosine=` on the Match line (CLI **similarity**, higher is better). There is no `search --json` flag in the 3.3.x line. If `stats.palace.status` is `unparseable`, the CLI format changed — file a fixture, do not grep the tree as a substitute for `get_context`.
 
 Opt in (first match that enables, unless a disable wins):
 
@@ -284,7 +284,7 @@ Opt in (first match that enables, unless a disable wins):
 2. Env `ENGRAM_PALACE=1` (also `true` / `yes`)
 3. File `.engram/config.toml` with `palace = true`
 
-Disable always wins: `include_palace: false` or `ENGRAM_PALACE=0` (`false` / `no`) even if the config file says `true`.
+Disable always wins: `include_palace: false` or `ENGRAM_PALACE=0` (`false` / `no`) even if the config file says `true`. Opt-in is not enough without a wing.
 
 ```bash
 engram get-context "why did we choose WebSockets?" --palace --json
@@ -292,12 +292,17 @@ engram get-context "why did we choose WebSockets?" --palace --json
 
 On MCP, pass `"include_palace": true` on the `get_context` tool call. The Engram server config is unchanged.
 
-Always-on for this repo (do not commit `.engram/`):
+This repo keeps palace **off**. Tracked config (the sqlite index stays gitignored):
 
 ```toml
 # .engram/config.toml
-palace = true
+palace = false
+palace_wing = "engram"
+palace_room = "decisions"
+palace_min_cosine = 0.6
 ```
+
+`palace_min_cosine` is CLI similarity (default `0.6`). Missing cosine on a hit is below the floor and is dropped. Empty `palace_room` omits `--room` (whole wing).
 
 Palace items look like this in the package:
 
@@ -308,7 +313,7 @@ Palace items look like this in the package:
 | `why` | `["palace"]` |
 | `text` | verbatim drawer (truncated at 1200 characters, never summarized) |
 
-`stats.palace` is omitted when attachment is off. When it ran you get `status` (`ok`, `not_installed`, `timeout`, `unparseable`), plus `attempted` / `included` / `dropped_for_budget`.
+`stats.palace` is omitted when attachment is off. When attach ran you get `status` (`ok`, `not_installed`, `timeout`, `unparseable`, `unscoped_disabled`, `below_threshold`), plus `attempted` / `included` / `dropped_for_budget`. `attempted` is the pre-filter hit count (max 3). Cosine rejects are `below_threshold`, not `dropped_for_budget`.
 
 Override the binary with `ENGRAM_PALACE_BIN=/path/to/mempalace` if it is not on `PATH`. If `mempalace` is not installed, the code package still returns.
 
