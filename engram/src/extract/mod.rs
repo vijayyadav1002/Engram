@@ -228,6 +228,79 @@ def helper():
         assert!(yaml.edges.is_empty());
     }
 
+    fn heading_names(ext: &Extraction) -> Vec<&str> {
+        ext.symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Heading)
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn json_two_level_object_keys() {
+        let src = r#"{ "scripts": { "test": "vitest" }, "name": "app" }"#;
+        let ext = crate::extract::json::extract(src);
+        assert_eq!(ext.status, ParseStatus::Outline);
+        assert!(ext.edges.is_empty());
+        let names = heading_names(&ext);
+        assert!(names.contains(&"scripts"), "{names:?}");
+        assert!(names.contains(&"scripts.test"), "{names:?}");
+        assert!(names.contains(&"name"), "{names:?}");
+        assert!(!names.contains(&"test"), "bare nested key must not be a symbol: {names:?}");
+        assert!(ext.symbols.iter().all(|s| s.name != "<file>"));
+        assert!(ext.symbols.iter().all(|s| s.kind == SymbolKind::Heading));
+        assert!(ext
+            .symbols
+            .iter()
+            .all(|s| s.signature.as_deref() == Some("key")));
+        let scripts = ext.symbols.iter().find(|s| s.name == "scripts").unwrap();
+        let slice = &src[scripts.start_byte as usize..scripts.end_byte as usize];
+        assert!(slice.contains("\"test\""), "span must be the pair, got {slice:?}");
+    }
+
+    #[test]
+    fn json_nested_mapping_and_array_and_root() {
+        let deps = crate::extract::json::extract(r#"{ "dependencies": { "react": "18" } }"#);
+        let names = heading_names(&deps);
+        assert!(names.contains(&"dependencies") && names.contains(&"dependencies.react"), "{names:?}");
+
+        let items = crate::extract::json::extract(r#"{ "items": [ { "id": 1 } ] }"#);
+        let names = heading_names(&items);
+        assert_eq!(names, vec!["items"]);
+
+        let deep = crate::extract::json::extract(r#"{ "a": { "b": { "c": 1 } } }"#);
+        let names = heading_names(&deep);
+        assert!(names.contains(&"a") && names.contains(&"a.b"), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("a.b.c")), "{names:?}");
+
+        let arr = crate::extract::json::extract("[ { \"a\": 1 } ]");
+        assert_eq!(arr.status, ParseStatus::Outline);
+        assert!(heading_names(&arr).is_empty());
+
+        let scalar = crate::extract::json::extract("\"hello\"\n");
+        assert_eq!(scalar.status, ParseStatus::Outline);
+        assert!(heading_names(&scalar).is_empty());
+    }
+
+    #[test]
+    fn json_junk_comments_quotes_duplicates() {
+        let junk = crate::extract::json::extract("{");
+        assert_eq!(junk.status, ParseStatus::Error);
+        assert!(junk.symbols.is_empty());
+
+        let commented = crate::extract::json::extract("{\n  // keep\n  \"name\": \"app\"\n}\n");
+        assert_eq!(commented.status, ParseStatus::Outline);
+        assert!(heading_names(&commented).contains(&"name"));
+
+        let quoted = crate::extract::json::extract("{ \"scripts\": 1 }\n");
+        assert!(heading_names(&quoted).contains(&"scripts"));
+        assert!(!heading_names(&quoted).iter().any(|n| n.contains('"')));
+
+        let dup = crate::extract::json::extract("{ \"a\": 1, \"a\": 2 }\n");
+        let count = heading_names(&dup).iter().filter(|n| **n == "a").count();
+        assert_eq!(count, 2);
+    }
+
     #[test]
     fn graphql_empty_source_is_error() {
         let ext = crate::extract::graphql::extract("");
