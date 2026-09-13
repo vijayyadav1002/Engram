@@ -1,5 +1,5 @@
 use crate::types::{
-    ExtractedEdge, ExtractedSymbol, Extraction, ParseStatus, SymbolKind,
+    Confidence, EdgeKind, ExtractedEdge, ExtractedSymbol, Extraction, ParseStatus, SymbolKind,
 };
 use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
@@ -52,6 +52,7 @@ pub fn extract(source: &str) -> Extraction {
     };
 
     let mut symbols = vec![module_symbol(root)];
+    let mut edges = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&query, root, source.as_bytes());
     while let Some(m) = matches.next() {
@@ -62,6 +63,7 @@ pub fn extract(source: &str) -> Extraction {
         let mut op: Option<Node> = None;
         let mut frag: Option<Node> = None;
         let mut op_type: Option<Node> = None;
+        let mut frag_on: Option<Node> = None;
         let mut name: Option<Node> = None;
         for cap in m.captures {
             match query.capture_names()[cap.index as usize] {
@@ -72,7 +74,7 @@ pub fn extract(source: &str) -> Extraction {
                 "op" => op = Some(cap.node),
                 "frag" => frag = Some(cap.node),
                 "op_type" => op_type = Some(cap.node),
-                "frag_on" => {}
+                "frag_on" => frag_on = Some(cap.node),
                 "name" => name = Some(cap.node),
                 _ => {}
             }
@@ -95,7 +97,15 @@ pub fn extract(source: &str) -> Extraction {
                 "scalar_type_definition" => (SymbolKind::Type, "scalar"),
                 _ => continue,
             };
-            push_symbol(&mut symbols, ident, kind, node, Some(signature));
+            push_symbol(&mut symbols, ident.clone(), kind, node, Some(signature));
+            for iface in implemented_names(source, node) {
+                edges.push(ExtractedEdge {
+                    src_name: ident.clone(),
+                    dst_name: iface,
+                    kind: EdgeKind::Import,
+                    confidence: Confidence::High,
+                });
+            }
             continue;
         }
         if let Some(node) = field {
@@ -181,11 +191,19 @@ pub fn extract(source: &str) -> Extraction {
                 .filter(|s| !s.is_empty());
             push_symbol(
                 &mut symbols,
-                ident,
+                ident.clone(),
                 SymbolKind::Function,
                 node,
                 sig.as_deref(),
             );
+            if let Some(dst) = first_root_call_dest(source, node) {
+                edges.push(ExtractedEdge {
+                    src_name: ident,
+                    dst_name: dst,
+                    kind: EdgeKind::Call,
+                    confidence: Confidence::Low,
+                });
+            }
             continue;
         }
         if let Some(node) = frag {
@@ -199,18 +217,29 @@ pub fn extract(source: &str) -> Extraction {
             }
             push_symbol(
                 &mut symbols,
-                ident,
+                ident.clone(),
                 SymbolKind::Type,
                 node,
                 Some("fragment"),
             );
+            if let Some(on_node) = frag_on {
+                let on_type = text(source, on_node);
+                if !on_type.is_empty() {
+                    edges.push(ExtractedEdge {
+                        src_name: ident,
+                        dst_name: on_type,
+                        kind: EdgeKind::Import,
+                        confidence: Confidence::High,
+                    });
+                }
+            }
         }
     }
 
     Extraction {
         status: ParseStatus::Graph,
         symbols,
-        edges: Vec::<ExtractedEdge>::new(),
+        edges,
     }
 }
 
@@ -249,6 +278,92 @@ fn enclosing_parent_name(source: &str, mut node: Node<'_>) -> Option<String> {
 fn name_of_def(source: &str, def: Node<'_>) -> Option<String> {
     let mut walk = def.walk();
     for child in def.children(&mut walk) {
+        if child.kind() == "name" {
+            let ident = text(source, child);
+            if !ident.is_empty() {
+                return Some(ident);
+            }
+        }
+    }
+    None
+}
+
+fn implemented_names(source: &str, def: Node<'_>) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut walk = def.walk();
+    for child in def.children(&mut walk) {
+        if child.kind() == "implements_interfaces" {
+            collect_named_types(source, child, &mut names);
+        }
+    }
+    names
+}
+
+fn collect_named_types(source: &str, node: Node<'_>, out: &mut Vec<String>) {
+    if node.kind() == "named_type" {
+        let ident = text(source, node);
+        if !ident.is_empty() {
+            out.push(ident);
+        }
+        return;
+    }
+    let mut walk = node.walk();
+    for child in node.children(&mut walk) {
+        collect_named_types(source, child, out);
+    }
+}
+
+fn first_root_call_dest(source: &str, op: Node<'_>) -> Option<String> {
+    let mut op_type = None;
+    let mut selection_set = None;
+    let mut walk = op.walk();
+    for child in op.children(&mut walk) {
+        match child.kind() {
+            "operation_type" => op_type = Some(text(source, child)),
+            "selection_set" => selection_set = Some(child),
+            _ => {}
+        }
+    }
+    let root = match op_type.as_deref() {
+        Some("query") => "Query",
+        Some("mutation") => "Mutation",
+        Some("subscription") => "Subscription",
+        _ => return None,
+    };
+    let set = selection_set?;
+    let mut walk = set.walk();
+    for child in set.children(&mut walk) {
+        let field = if child.kind() == "field" {
+            child
+        } else if child.kind() == "selection" {
+            let mut sw = child.walk();
+            let mut found = None;
+            for n in child.children(&mut sw) {
+                if n.kind() == "field" {
+                    found = Some(n);
+                    break;
+                }
+            }
+            match found {
+                Some(n) => n,
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        if let Some(field_ident) = field_response_name(source, field) {
+            return Some(format!("{root}.{field_ident}"));
+        }
+    }
+    None
+}
+
+fn field_response_name(source: &str, field: Node<'_>) -> Option<String> {
+    let mut walk = field.walk();
+    for child in field.children(&mut walk) {
+        if child.kind() == "alias" {
+            continue;
+        }
         if child.kind() == "name" {
             let ident = text(source, child);
             if !ident.is_empty() {

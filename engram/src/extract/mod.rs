@@ -329,4 +329,54 @@ fragment ReservationFields on Reservation { id name }
             .any(|s| s.kind == SymbolKind::Function));
         assert!(!ext.symbols.iter().any(|s| s.name == "reservation"));
     }
+
+    #[test]
+    fn graphql_implements_and_fragment_import_edges() {
+        let src = r#"
+interface Node { id: ID! }
+interface Timestamped { updatedAt: String }
+type Reservation implements Node & Timestamped { id: ID! }
+fragment ReservationFields on Reservation { id }
+"#;
+        let ext = crate::extract::graphql::extract(src);
+        assert!(ext.edges.iter().any(|e| {
+            e.src_name == "Reservation"
+                && e.dst_name == "Node"
+                && e.kind == EdgeKind::Import
+                && e.confidence == crate::types::Confidence::High
+        }));
+        assert!(ext.edges.iter().any(|e| {
+            e.src_name == "Reservation" && e.dst_name == "Timestamped"
+        }));
+        assert!(ext.edges.iter().any(|e| {
+            e.src_name == "ReservationFields"
+                && e.dst_name == "Reservation"
+                && e.kind == EdgeKind::Import
+                && e.confidence == crate::types::Confidence::High
+        }));
+    }
+
+    #[test]
+    fn graphql_operation_call_uses_default_root_and_skips_alias() {
+        let src = r#"
+query GetReservation { hotel: reservation { id } }
+query OnlyFrag { ...ReservationFields }
+mutation CreateBooking { createBooking { id } }
+"#;
+        let ext = crate::extract::graphql::extract(src);
+        assert!(ext.edges.iter().any(|e| {
+            e.src_name == "GetReservation"
+                && e.dst_name == "Query.reservation"
+                && e.kind == EdgeKind::Call
+                && e.confidence == crate::types::Confidence::Low
+        }));
+        assert!(!ext
+            .edges
+            .iter()
+            .any(|e| e.dst_name == "Query.hotel"));
+        assert!(!ext.edges.iter().any(|e| e.src_name == "OnlyFrag"));
+        assert!(ext.edges.iter().any(|e| {
+            e.src_name == "CreateBooking" && e.dst_name == "Mutation.createBooking"
+        }));
+    }
 }
