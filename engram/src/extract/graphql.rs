@@ -18,7 +18,14 @@ const EXTENSION_KINDS: &[&str] = &[
 
 const QUERY_SRC: &str = r#"
 (object_type_definition (name) @name) @def
+(interface_type_definition (name) @name) @def
+(enum_type_definition (name) @name) @def
+(union_type_definition (name) @name) @def
+(input_object_type_definition (name) @name) @def
+(scalar_type_definition (name) @name) @def
 (field_definition (name) @name) @field
+(input_value_definition (name) @name) @input_value
+(enum_value_definition (enum_value) @name) @enum_value
 "#;
 
 pub fn extract(source: &str) -> Extraction {
@@ -48,11 +55,15 @@ pub fn extract(source: &str) -> Extraction {
     while let Some(m) = matches.next() {
         let mut def: Option<Node> = None;
         let mut field: Option<Node> = None;
+        let mut input_value: Option<Node> = None;
+        let mut enum_value: Option<Node> = None;
         let mut name: Option<Node> = None;
         for cap in m.captures {
             match query.capture_names()[cap.index as usize] {
                 "def" => def = Some(cap.node),
                 "field" => field = Some(cap.node),
+                "input_value" => input_value = Some(cap.node),
+                "enum_value" => enum_value = Some(cap.node),
                 "name" => name = Some(cap.node),
                 _ => {}
             }
@@ -66,7 +77,16 @@ pub fn extract(source: &str) -> Extraction {
             if ident.is_empty() {
                 continue;
             }
-            push_symbol(&mut symbols, ident, SymbolKind::Type, node, Some("type"));
+            let (kind, signature) = match node.kind() {
+                "object_type_definition" => (SymbolKind::Type, "type"),
+                "interface_type_definition" => (SymbolKind::Interface, "interface"),
+                "enum_type_definition" => (SymbolKind::Type, "enum"),
+                "union_type_definition" => (SymbolKind::Type, "union"),
+                "input_object_type_definition" => (SymbolKind::Type, "input"),
+                "scalar_type_definition" => (SymbolKind::Type, "scalar"),
+                _ => continue,
+            };
+            push_symbol(&mut symbols, ident, kind, node, Some(signature));
             continue;
         }
         if let Some(node) = field {
@@ -88,6 +108,55 @@ pub fn extract(source: &str) -> Extraction {
                 node,
                 Some("field"),
             );
+            continue;
+        }
+        if let Some(node) = input_value {
+            if skip_node(node) {
+                continue;
+            }
+            if !has_ancestor_in(node, &["input_fields_definition"]) {
+                continue;
+            }
+            if has_ancestor_in(node, &["arguments_definition"]) {
+                continue;
+            }
+            let Some(name_node) = name else { continue };
+            let field_ident = text(source, name_node);
+            let Some(parent) = enclosing_parent_name(source, node) else {
+                continue;
+            };
+            if field_ident.is_empty() {
+                continue;
+            }
+            push_symbol(
+                &mut symbols,
+                format!("{parent}.{field_ident}"),
+                SymbolKind::Method,
+                node,
+                Some("field"),
+            );
+            continue;
+        }
+        if let Some(node) = enum_value {
+            if skip_node(node) {
+                continue;
+            }
+            let Some(name_node) = name else { continue };
+            let val = text(source, name_node);
+            let Some(parent) = enclosing_parent_name(source, node) else {
+                continue;
+            };
+            if val.is_empty() {
+                continue;
+            }
+            push_symbol(
+                &mut symbols,
+                format!("{parent}.{val}"),
+                SymbolKind::Method,
+                node,
+                Some("enum_value"),
+            );
+            continue;
         }
     }
 

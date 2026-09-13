@@ -217,4 +217,70 @@ def helper():
             .iter()
             .any(|s| s.name == "<file>" && s.kind == SymbolKind::Module));
     }
+
+    #[test]
+    fn graphql_sdl_kinds() {
+        let src = r#"
+interface Node { id: ID! }
+enum Status { OPEN CLOSED }
+union Vehicle = Car | Bike
+input CreateBookingInput { checkIn: String! }
+scalar DateTime
+"#;
+        let ext = crate::extract::graphql::extract(src);
+        assert_eq!(ext.status, ParseStatus::Graph);
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "Node"
+                && s.kind == SymbolKind::Interface
+                && s.signature.as_deref() == Some("interface")
+        }));
+        assert!(ext.symbols.iter().any(|s| s.name == "Node.id"));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "Status"
+                && s.kind == SymbolKind::Type
+                && s.signature.as_deref() == Some("enum")
+        }));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "Status.OPEN"
+                && s.kind == SymbolKind::Method
+                && s.signature.as_deref() == Some("enum_value")
+        }));
+        assert!(ext.symbols.iter().any(|s| s.name == "Status.CLOSED"));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "Vehicle"
+                && s.kind == SymbolKind::Type
+                && s.signature.as_deref() == Some("union")
+        }));
+        assert!(!ext.symbols.iter().any(|s| s.name.contains("Car")));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "CreateBookingInput"
+                && s.kind == SymbolKind::Type
+                && s.signature.as_deref() == Some("input")
+        }));
+        assert!(ext.symbols.iter().any(|s| s.name == "CreateBookingInput.checkIn"));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "DateTime"
+                && s.kind == SymbolKind::Type
+                && s.signature.as_deref() == Some("scalar")
+        }));
+    }
+
+    #[test]
+    fn graphql_skips_extend_directives_and_arguments() {
+        let src = r#"
+extend type Reservation { extra: String }
+directive @auth on FIELD_DEFINITION
+type Query {
+  reservation(id: ID!): Reservation
+}
+"#;
+        let ext = crate::extract::graphql::extract(src);
+        assert_eq!(ext.status, ParseStatus::Graph);
+        assert!(!ext.symbols.iter().any(|s| s.name == "Reservation"));
+        assert!(!ext.symbols.iter().any(|s| s.name == "auth" || s.name == "@auth"));
+        assert!(ext.symbols.iter().any(|s| s.name == "Query"));
+        assert!(ext.symbols.iter().any(|s| s.name == "Query.reservation"));
+        assert!(!ext.symbols.iter().any(|s| s.name == "Query.reservation.id"));
+        assert!(!ext.symbols.iter().any(|s| s.name == "id" || s.name.ends_with(".id")));
+    }
 }
