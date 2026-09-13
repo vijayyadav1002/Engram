@@ -1,0 +1,15 @@
+type Reservation {
+  id: ID!
+  name: String
+}
+
+query GetReservation {
+  reservation {
+    id
+    ...ReservationFields
+  }
+}
+
+fragment ReservationFields on Reservation {
+  name
+}

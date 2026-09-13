@@ -161,6 +161,10 @@ fn grammar_status() -> String {
             "js",
             tree_sitter::Language::from(tree_sitter_javascript::LANGUAGE),
         ),
+        (
+            "graphql",
+            tree_sitter::Language::from(tree_sitter_graphql::LANGUAGE),
+        ),
     ];
     let mut ok = Vec::new();
     let mut bad = Vec::new();
@@ -213,5 +217,21 @@ mod tests {
         let out = run_status(&root).unwrap();
         assert!(out.contains("commits: 3"), "status: {out}");
         assert!(out.contains("git: ok"), "status: {out}");
+    }
+
+    #[test]
+    fn grammars_line_includes_graphql() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        let out = run_doctor(&root).unwrap();
+        let grammars = out
+            .lines()
+            .find(|l| l.starts_with("grammars:"))
+            .unwrap_or(&out);
+        assert!(
+            grammars.contains("graphql") && grammars.contains("ok"),
+            "doctor grammars: {grammars}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

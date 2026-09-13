@@ -1,7 +1,7 @@
 # Engram GraphQL Extractor Design
 
 Date: 2026-09-13
-Status: proposed
+Status: implemented on main
 Scope: graph extraction for standalone `.graphql` / `.gql` files (name lookup)
 Depends on: `docs/superpowers/specs/2026-09-07-engram-core-design.md`
 Related: language-support scan in `.prompts/update.prompt.md` (YAML/JSON, Bruno, Cucumber, and embedded GraphQL in TypeScript are **not** this slice)
