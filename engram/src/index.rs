@@ -511,6 +511,8 @@ fn language_of(rel_posix: &str) -> Option<&'static str> {
         Some("markdown")
     } else if lower.ends_with(".css") || lower.ends_with(".scss") {
         Some("css")
+    } else if lower.ends_with(".graphql") || lower.ends_with(".gql") {
+        Some("graphql")
     } else {
         None
     }
@@ -773,6 +775,9 @@ mod tests {
         assert_eq!(language_of("lib/util.js"), Some("javascript"));
         assert_eq!(language_of("README.md"), Some("markdown"));
         assert_eq!(language_of("styles/auth.css"), Some("css"));
+        assert_eq!(language_of("schema.graphql"), Some("graphql"));
+        assert_eq!(language_of("ops.GQL"), Some("graphql"));
+        assert_eq!(language_of("schema.graphqls"), None);
         assert_eq!(language_of("notes.txt"), None);
     }
 

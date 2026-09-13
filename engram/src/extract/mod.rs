@@ -1,4 +1,5 @@
 pub mod css;
+pub mod graphql;
 pub mod markdown;
 pub mod python;
 pub mod ts;
@@ -25,6 +26,9 @@ pub fn extract_path(rel_posix: &str, source: &str) -> Extraction {
     }
     if lower.ends_with(".css") || lower.ends_with(".scss") {
         return css::extract(source);
+    }
+    if lower.ends_with(".graphql") || lower.ends_with(".gql") {
+        return graphql::extract(source);
     }
     Extraction {
         status: ParseStatus::File,
@@ -163,5 +167,31 @@ def helper():
             .symbols
             .iter()
             .any(|s| s.name == "helper" && s.kind == SymbolKind::Function));
+    }
+
+    #[test]
+    fn extract_path_dispatches_graphql_not_graphqls() {
+        let src = "type Reservation { id: ID! }\n";
+        let gql = extract_path("schema.graphql", src);
+        assert_eq!(gql.status, ParseStatus::Graph);
+        assert!(gql
+            .symbols
+            .iter()
+            .any(|s| s.name == "<file>" && s.kind == SymbolKind::Module));
+
+        let short = extract_path("ops.gql", src);
+        assert_eq!(short.status, ParseStatus::Graph);
+
+        let sdl = extract_path("schema.graphqls", src);
+        assert_eq!(sdl.status, ParseStatus::File);
+        assert!(sdl.symbols.is_empty());
+    }
+
+    #[test]
+    fn graphql_empty_source_is_error() {
+        let ext = crate::extract::graphql::extract("");
+        assert_eq!(ext.status, ParseStatus::Error);
+        assert!(ext.symbols.is_empty());
+        assert!(ext.edges.is_empty());
     }
 }
