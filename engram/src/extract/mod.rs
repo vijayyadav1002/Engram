@@ -1,8 +1,10 @@
 pub mod css;
 pub mod graphql;
+pub mod json;
 pub mod markdown;
 pub mod python;
 pub mod ts;
+pub mod yaml;
 
 use crate::types::{Extraction, ParseStatus};
 
@@ -26,6 +28,12 @@ pub fn extract_path(rel_posix: &str, source: &str) -> Extraction {
     }
     if lower.ends_with(".css") || lower.ends_with(".scss") {
         return css::extract(source);
+    }
+    if lower.ends_with(".json") {
+        return json::extract(source);
+    }
+    if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        return yaml::extract(source);
     }
     if lower.ends_with(".graphql") || lower.ends_with(".gql") {
         return graphql::extract(source);
@@ -185,6 +193,39 @@ def helper():
         let sdl = extract_path("schema.graphqls", src);
         assert_eq!(sdl.status, ParseStatus::File);
         assert!(sdl.symbols.is_empty());
+    }
+
+    #[test]
+    fn extract_path_dispatches_json_yaml_not_jsonc() {
+        let json = extract_path("package.json", "{}\n");
+        assert_eq!(json.status, ParseStatus::Outline);
+        assert!(json.symbols.is_empty());
+        assert!(json.edges.is_empty());
+        assert!(json.symbols.iter().all(|s| s.name != "<file>"));
+
+        let yaml = extract_path("values.yaml", "{}\n");
+        assert_eq!(yaml.status, ParseStatus::Outline);
+        assert!(yaml.edges.is_empty());
+
+        let yml = extract_path("app.YML", "{}\n");
+        assert_eq!(yml.status, ParseStatus::Outline);
+
+        let jsonc = extract_path("tsconfig.jsonc", "{}\n");
+        assert_eq!(jsonc.status, ParseStatus::File);
+        assert!(jsonc.symbols.is_empty());
+    }
+
+    #[test]
+    fn json_yaml_empty_source_is_error() {
+        let json = crate::extract::json::extract("");
+        assert_eq!(json.status, ParseStatus::Error);
+        assert!(json.symbols.is_empty());
+        assert!(json.edges.is_empty());
+
+        let yaml = crate::extract::yaml::extract("");
+        assert_eq!(yaml.status, ParseStatus::Error);
+        assert!(yaml.symbols.is_empty());
+        assert!(yaml.edges.is_empty());
     }
 
     #[test]

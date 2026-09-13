@@ -513,6 +513,10 @@ fn language_of(rel_posix: &str) -> Option<&'static str> {
         Some("css")
     } else if lower.ends_with(".graphql") || lower.ends_with(".gql") {
         Some("graphql")
+    } else if lower.ends_with(".json") {
+        Some("json")
+    } else if lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        Some("yaml")
     } else {
         None
     }
@@ -778,6 +782,10 @@ mod tests {
         assert_eq!(language_of("schema.graphql"), Some("graphql"));
         assert_eq!(language_of("ops.GQL"), Some("graphql"));
         assert_eq!(language_of("schema.graphqls"), None);
+        assert_eq!(language_of("package.json"), Some("json"));
+        assert_eq!(language_of("values.yaml"), Some("yaml"));
+        assert_eq!(language_of("app.YML"), Some("yaml"));
+        assert_eq!(language_of("tsconfig.jsonc"), None);
         assert_eq!(language_of("notes.txt"), None);
     }
 
