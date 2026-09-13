@@ -1,0 +1,6 @@
+{
+  "name": "miniapp",
+  "scripts": {
+    "test": "echo ok"
+  }
+}

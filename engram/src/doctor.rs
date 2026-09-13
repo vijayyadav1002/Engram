@@ -165,6 +165,14 @@ fn grammar_status() -> String {
             "graphql",
             tree_sitter::Language::from(tree_sitter_graphql::LANGUAGE),
         ),
+        (
+            "json",
+            tree_sitter::Language::from(tree_sitter_json::LANGUAGE),
+        ),
+        (
+            "yaml",
+            tree_sitter::Language::from(tree_sitter_yaml::LANGUAGE),
+        ),
     ];
     let mut ok = Vec::new();
     let mut bad = Vec::new();
@@ -230,6 +238,22 @@ mod tests {
             .unwrap_or(&out);
         assert!(
             grammars.contains("graphql") && grammars.contains("ok"),
+            "doctor grammars: {grammars}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn grammars_line_includes_json_and_yaml() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        let out = run_doctor(&root).unwrap();
+        let grammars = out
+            .lines()
+            .find(|l| l.starts_with("grammars:"))
+            .unwrap_or(&out);
+        assert!(
+            grammars.contains("json") && grammars.contains("yaml") && grammars.contains("ok"),
             "doctor grammars: {grammars}"
         );
         let _ = std::fs::remove_dir_all(&root);

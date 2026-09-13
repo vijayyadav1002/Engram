@@ -94,7 +94,7 @@ Repo root: `ENGRAM_ROOT` if set, else walk up from cwd to `.engram/` or `.git`. 
 | Depth | Extensions | Extractor |
 |---|---|---|
 | Graph (symbols + import/call edges) | `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` `.py` `.graphql` `.gql` | tree-sitter grammars linked into the binary |
-| Outline + FTS | `.md` `.mdx` `.css` `.scss` | headings (`kind=heading`) or selectors (`kind=selector`); no edges |
+| Outline + FTS | `.md` `.mdx` `.css` `.scss` `.json` `.yaml` `.yml` | headings (`kind=heading`), selectors (`kind=selector`), or two-level keys (`kind=heading`); no edges |
 | File row only | anything else not ignored | `files` + FTS, no symbols |
 
 `parse_status` on each file: `graph` | `outline` | `file` | `skipped` | `error`.

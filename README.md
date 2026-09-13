@@ -13,7 +13,7 @@ Conversation memory stays elsewhere (for example [MemPalace](https://github.com/
 | Depth | Files |
 |---|---|
 | Graph (symbols, imports, calls) | `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` `.py` |
-| Outline + search | `.md` `.mdx` `.css` `.scss` |
+| Outline + search | `.md` `.mdx` `.css` `.scss` `.json` `.yaml` `.yml` |
 | File text only | everything else that is not ignored |
 
 Rust, Go, and other languages are stored as files and searched as text. They do not get a symbol graph in this version.
