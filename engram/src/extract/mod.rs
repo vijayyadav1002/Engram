@@ -302,6 +302,55 @@ def helper():
     }
 
     #[test]
+    fn yaml_block_flow_sequence_and_multidoc() {
+        let block = crate::extract::yaml::extract("services:\n  web:\n    port: 80\n");
+        assert_eq!(block.status, ParseStatus::Outline);
+        assert!(block.edges.is_empty());
+        let names = heading_names(&block);
+        assert!(names.contains(&"services"), "{names:?}");
+        assert!(names.contains(&"services.web"), "{names:?}");
+        assert!(!names.contains(&"web"), "{names:?}");
+        assert!(!names.iter().any(|n| *n == "services.web.port" || *n == "port"), "{names:?}");
+        let svc = block.symbols.iter().find(|s| s.name == "services").unwrap();
+        assert_eq!(svc.kind, SymbolKind::Heading);
+        assert_eq!(svc.signature.as_deref(), Some("key"));
+
+        let flow = crate::extract::yaml::extract("{a: {b: 1}}\n");
+        let names = heading_names(&flow);
+        assert!(names.contains(&"a") && names.contains(&"a.b"), "{names:?}");
+
+        let seq = crate::extract::yaml::extract("items:\n  - id: 1\n");
+        let names = heading_names(&seq);
+        assert_eq!(names, vec!["items"]);
+
+        let multi = crate::extract::yaml::extract("---\na: 1\n---\nb:\n  c: 2\n");
+        let names = heading_names(&multi);
+        assert!(names.contains(&"a"), "{names:?}");
+        assert!(names.contains(&"b"), "{names:?}");
+        assert!(names.contains(&"b.c"), "{names:?}");
+    }
+
+    #[test]
+    fn yaml_skip_merge_alias_strip_quotes() {
+        let src = "x: &anchor\n  k: 1\ny:\n  <<: *anchor\n  z: 2\n";
+        let ext = crate::extract::yaml::extract(src);
+        assert_eq!(ext.status, ParseStatus::Outline);
+        let names = heading_names(&ext);
+        assert!(names.contains(&"x"), "{names:?}");
+        assert!(names.contains(&"x.k"), "{names:?}");
+        assert!(names.contains(&"y"), "{names:?}");
+        assert!(names.contains(&"y.z"), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains("<<")), "{names:?}");
+        assert!(!names.iter().any(|n| n.starts_with('*')), "{names:?}");
+
+        let quoted = crate::extract::yaml::extract("\"web\": 1\n'svc': 2\n");
+        let names = heading_names(&quoted);
+        assert!(names.contains(&"web"), "{names:?}");
+        assert!(names.contains(&"svc"), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains('"') || n.contains('\'')), "{names:?}");
+    }
+
+    #[test]
     fn graphql_empty_source_is_error() {
         let ext = crate::extract::graphql::extract("");
         assert_eq!(ext.status, ParseStatus::Error);
