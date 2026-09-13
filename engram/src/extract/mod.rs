@@ -283,4 +283,50 @@ type Query {
         assert!(!ext.symbols.iter().any(|s| s.name == "Query.reservation.id"));
         assert!(!ext.symbols.iter().any(|s| s.name == "id" || s.name.ends_with(".id")));
     }
+
+    #[test]
+    fn graphql_named_operations_and_fragments() {
+        let src = r#"
+query GetReservation { reservation { id } }
+mutation CreateBooking { createBooking { id } }
+subscription OnUpdate { update { id } }
+fragment ReservationFields on Reservation { id name }
+"#;
+        let ext = crate::extract::graphql::extract(src);
+        assert_eq!(ext.status, ParseStatus::Graph);
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "GetReservation"
+                && s.kind == SymbolKind::Function
+                && s.signature.as_deref() == Some("query")
+        }));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "CreateBooking"
+                && s.kind == SymbolKind::Function
+                && s.signature.as_deref() == Some("mutation")
+        }));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "OnUpdate"
+                && s.kind == SymbolKind::Function
+                && s.signature.as_deref() == Some("subscription")
+        }));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "ReservationFields"
+                && s.kind == SymbolKind::Type
+                && s.signature.as_deref() == Some("fragment")
+        }));
+        assert!(!ext.symbols.iter().any(|s| s.name == "reservation"));
+        assert!(!ext.symbols.iter().any(|s| s.name == "id"));
+    }
+
+    #[test]
+    fn graphql_skips_anonymous_operations() {
+        let src = "query { reservation { id } }\n{ leftover }\n";
+        let ext = crate::extract::graphql::extract(src);
+        assert_eq!(ext.status, ParseStatus::Graph);
+        assert!(!ext
+            .symbols
+            .iter()
+            .any(|s| s.kind == SymbolKind::Function));
+        assert!(!ext.symbols.iter().any(|s| s.name == "reservation"));
+    }
 }

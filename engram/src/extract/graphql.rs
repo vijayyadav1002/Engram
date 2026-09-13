@@ -26,6 +26,8 @@ const QUERY_SRC: &str = r#"
 (field_definition (name) @name) @field
 (input_value_definition (name) @name) @input_value
 (enum_value_definition (enum_value) @name) @enum_value
+(operation_definition (operation_type) @op_type (name) @name) @op
+(fragment_definition (fragment_name) @name (type_condition (named_type) @frag_on)) @frag
 "#;
 
 pub fn extract(source: &str) -> Extraction {
@@ -57,6 +59,9 @@ pub fn extract(source: &str) -> Extraction {
         let mut field: Option<Node> = None;
         let mut input_value: Option<Node> = None;
         let mut enum_value: Option<Node> = None;
+        let mut op: Option<Node> = None;
+        let mut frag: Option<Node> = None;
+        let mut op_type: Option<Node> = None;
         let mut name: Option<Node> = None;
         for cap in m.captures {
             match query.capture_names()[cap.index as usize] {
@@ -64,6 +69,10 @@ pub fn extract(source: &str) -> Extraction {
                 "field" => field = Some(cap.node),
                 "input_value" => input_value = Some(cap.node),
                 "enum_value" => enum_value = Some(cap.node),
+                "op" => op = Some(cap.node),
+                "frag" => frag = Some(cap.node),
+                "op_type" => op_type = Some(cap.node),
+                "frag_on" => {}
                 "name" => name = Some(cap.node),
                 _ => {}
             }
@@ -157,6 +166,44 @@ pub fn extract(source: &str) -> Extraction {
                 Some("enum_value"),
             );
             continue;
+        }
+        if let Some(node) = op {
+            if skip_node(node) {
+                continue;
+            }
+            let Some(name_node) = name else { continue };
+            let ident = text(source, name_node);
+            if ident.is_empty() {
+                continue;
+            }
+            let sig = op_type
+                .map(|n| text(source, n))
+                .filter(|s| !s.is_empty());
+            push_symbol(
+                &mut symbols,
+                ident,
+                SymbolKind::Function,
+                node,
+                sig.as_deref(),
+            );
+            continue;
+        }
+        if let Some(node) = frag {
+            if skip_node(node) {
+                continue;
+            }
+            let Some(name_node) = name else { continue };
+            let ident = text(source, name_node);
+            if ident.is_empty() {
+                continue;
+            }
+            push_symbol(
+                &mut symbols,
+                ident,
+                SymbolKind::Type,
+                node,
+                Some("fragment"),
+            );
         }
     }
 
