@@ -194,4 +194,27 @@ def helper():
         assert!(ext.symbols.is_empty());
         assert!(ext.edges.is_empty());
     }
+
+    #[test]
+    fn graphql_object_type_and_qualified_fields() {
+        let src = "type Reservation {\n  id: ID!\n  name: String\n}\n";
+        let ext = crate::extract::graphql::extract(src);
+        assert_eq!(ext.status, ParseStatus::Graph);
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "Reservation"
+                && s.kind == SymbolKind::Type
+                && s.signature.as_deref() == Some("type")
+        }));
+        assert!(ext.symbols.iter().any(|s| {
+            s.name == "Reservation.id"
+                && s.kind == SymbolKind::Method
+                && s.signature.as_deref() == Some("field")
+        }));
+        assert!(ext.symbols.iter().any(|s| s.name == "Reservation.name"));
+        assert!(!ext.symbols.iter().any(|s| s.name == "id"));
+        assert!(ext
+            .symbols
+            .iter()
+            .any(|s| s.name == "<file>" && s.kind == SymbolKind::Module));
+    }
 }
