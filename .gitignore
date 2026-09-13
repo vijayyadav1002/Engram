@@ -4,5 +4,9 @@
 engram/target/
 .engram
 .engramignore
-.grok
+.grok/*
+!.grok/skills/
+!.grok/skills/**
+!.grok/hooks/
+!.grok/hooks/**
 .doc

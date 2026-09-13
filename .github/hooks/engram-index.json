@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "type": "command",
+        "matcher": "create|edit",
+        "bash": "engram index >/dev/null 2>&1; exit 0",
+        "powershell": "engram index | Out-Null; exit 0",
+        "cwd": ".",
+        "timeoutSec": 60
+      }
+    ]
+  }
+}

@@ -6,7 +6,7 @@ use tree_sitter::Parser;
 
 const STALE_SAMPLE: usize = 20;
 
-/// Multi-line diagnostic report: binary, grammars, DB, ignore files, harness presence.
+/// Multi-line diagnostic report: binary, grammars, DB, ignore files, harness and Grok/Copilot/Claude hook presence.
 pub fn run_doctor(root: &Path) -> Result<String, Error> {
     let mut lines = Vec::new();
     lines.push("binary: ok".to_string());
@@ -42,9 +42,18 @@ pub fn run_doctor(root: &Path) -> Result<String, Error> {
         root.join(".grok/config.toml").is_file(),
     ));
     lines.push(present_line(
+        "hook grok",
+        root.join(".grok/hooks/engram-index.json").is_file(),
+    ));
+    lines.push(present_line(
         "harness copilot/claude",
         root.join(".mcp.json").is_file(),
     ));
+    lines.push(present_line(
+        "hook copilot",
+        root.join(".github/hooks/engram-index.json").is_file(),
+    ));
+    lines.push(present_line("hook claude", claude_hook_present(root)));
     lines.push(present_line(
         "harness cursor",
         root.join(".cursor/mcp.json").is_file(),
@@ -121,8 +130,14 @@ fn open_doctor_db(db: &Path) -> Result<Store, Error> {
     }
 }
 
+fn claude_hook_present(root: &Path) -> bool {
+    std::fs::read_to_string(root.join(".claude/settings.json"))
+        .map(|s| s.contains("engram index"))
+        .unwrap_or(false)
+}
+
 fn present_line(label: &str, present: bool) -> String {
-    if !present && label.starts_with("harness") {
+    if !present && (label.starts_with("harness") || label.starts_with("hook")) {
         eprintln!("warn: {label} absent");
     }
     format!("{label}: {}", if present { "present" } else { "absent" })

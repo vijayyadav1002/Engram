@@ -29,7 +29,9 @@ The goal is a small, accurate answer:
 - Git commit messages and ADR spans may already appear in `get_context`
   (`kind=commit` / `kind=decision`); do not run `git log` before `get_context`.
 - After code changes, the index can be stale (`stale_index`). Do not invent
-  replacements for omitted spans.
+  replacements for omitted spans. Grok may already have reindexed editor writes
+  via `.grok/hooks/engram-index.json`, Copilot via `.github/hooks/engram-index.json`,
+  Claude via `.claude/settings.json`; shell edits still need `engram index`.
 
 ## MemPalace rules
 

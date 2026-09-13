@@ -93,7 +93,7 @@ commits: …
 git: ok|absent|not_installed|timeout|unparseable
 ```
 
-Re-run `engram index` after you change code. Unchanged files are skipped by content hash. To rebuild everything:
+Re-run `engram index` after you change code. Unchanged files are skipped by content hash. `engram init --harness grok` installs a project PostToolUse hook (`.grok/hooks/engram-index.json`) after Grok editor writes (`write` / `search_replace`); Grok project hooks need `/hooks-trust`. `--harness copilot` installs `.github/hooks/engram-index.json` for Copilot CLI / cloud agent after `create` / `edit`. `--harness claude` merges a PostToolUse hook into `.claude/settings.json` after `Write` / `Edit` / `MultiEdit`. These hooks are fail-open and do not cover shell edits. To rebuild everything:
 
 ```bash
 engram index --force
@@ -188,6 +188,12 @@ command = "engram"
 args = ["mcp"]
 ```
 
+The same `--harness grok` write also adds `.grok/hooks/engram-index.json` if that file is missing (it will not overwrite an existing hook). After a Grok `write` or `search_replace`, the hook runs `engram index` in the workspace root (60s timeout, stdout discarded, always exit 0). Trust the folder with `/hooks-trust` or `--trust` or the hook is skipped.
+
+`--harness copilot` (and `all`) writes `.github/hooks/engram-index.json` the same way: Copilot `postToolUse` on `create` / `edit`, `engram index` with stdout discarded and exit 0, 60s timeout. Copilot CLI and Copilot cloud agent load that directory.
+
+`--harness claude` (and `all`) merges a `PostToolUse` group into `.claude/settings.json` (creates the file if missing, preserves other keys, does not duplicate or overwrite unparseable JSON). Matcher is `Write|Edit|MultiEdit`. MCP stays read-only.
+
 Copilot CLI can also add it with:
 
 ```bash
@@ -202,7 +208,8 @@ The agent should call the `get_context` tool before grepping the repo. Retrieved
 cd ~/projects/my-app
 engram init --harness grok --skill
 engram index
-# work as usual; after larger edits:
+# Grok/Copilot/Claude editor writes reindex via PostToolUse hooks; shell edits
+# and other harnesses still need:
 engram index
 ```
 
@@ -218,7 +225,7 @@ Then in the agent: “Why do we use WebSockets?” — it should hit `get_contex
 | `engram search-symbols NAME` | Symbol lookup |
 | `engram search-code "…"` | Keyword (FTS) lookup |
 | `engram status` | DB path, schema, file/symbol/commit counts, `git_head`, last index, stale sample |
-| `engram doctor` | Binary, grammars, DB, ignore files, harness config |
+| `engram doctor` | Binary, grammars, DB, ignore files, harness config, Grok/Copilot/Claude reindex hooks |
 | `engram mcp` | Stdio MCP server (used by agents; you rarely run this yourself) |
 
 Exit codes: `0` ok, `1` usage, `2` not initialized, `3` index/IO error.
@@ -255,7 +262,7 @@ This crate is mostly Rust, so the **graph** will look small (TypeScript/Python f
 
 Engram is the **current repo**. MemPalace is **what you already said and decided**. Use both. Do not mine the source tree into the palace as a substitute for `engram index`, and do not dump palace wake-ups into the prompt as a substitute for `get_context`.
 
-Engram does **not** store conversations. For Grok, a user-level Stop/SessionEnd hook (`~/.grok/hooks/mempalace-grok.json`) can write MemPalace diaries; `engram init` does not install it.
+Engram does **not** store conversations. For Grok, a user-level Stop/SessionEnd hook (`~/.grok/hooks/mempalace-grok.json`) can write MemPalace diaries; `engram init` does not install it. Engram reindex hooks are separate: Grok `.grok/hooks/engram-index.json` (`--harness grok`), Copilot `.github/hooks/engram-index.json` (`--harness copilot`), Claude `.claude/settings.json` (`--harness claude`).
 
 The default integration is two MCP servers plus a router. `engram init --skill --write-agents` writes that router into `AGENTS.md` and `.grok/skills/engram/SKILL.md`.
 

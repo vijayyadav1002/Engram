@@ -103,7 +103,7 @@ File **bodies are not the source of truth for quotes**. FTS stores content for r
 
 ## 6. Indexer (`engram index`)
 
-Batch command. No file watcher.
+Batch command. No file watcher. `engram init --harness grok` (and `all`) may install a project Grok PostToolUse hook that shells incremental `engram index` after editor writes. `--harness copilot` (and `all`) installs the Copilot equivalent at `.github/hooks/engram-index.json` (`postToolUse` on `create` / `edit`). `--harness claude` (and `all`) merges a PostToolUse group into `.claude/settings.json` (`Write` / `Edit` / `MultiEdit`).
 
 ### 6.1 Walk and skip
 
@@ -278,10 +278,11 @@ Harness wiring (`engram init --harness`):
 
 | id | File |
 |---|---|
-| `grok` | `.grok/config.toml` |
-| `copilot` / `claude` | `.mcp.json` |
+| `grok` | `.grok/config.toml` and `.grok/hooks/engram-index.json` (write-if-missing) |
+| `copilot` | `.mcp.json` and `.github/hooks/engram-index.json` (write-if-missing) |
+| `claude` | `.mcp.json` and `.claude/settings.json` PostToolUse group (merge; no duplicate) |
 | `cursor` | `.cursor/mcp.json` |
-| `all` | merge into all of the above |
+| `all` | merge into all of the above (Grok, Copilot, and Claude hooks included) |
 
 Same argv everywhere: `engram` `["mcp"]`. `--skill` writes `.grok/skills/engram/SKILL.md`. `AGENTS.md` is created only with `--write-agents`; if it already exists the blurb is appended.
 
@@ -310,7 +311,7 @@ Config keys (line-oriented; last assignment wins): `palace`, `palace_wing`, `pal
 | `engram search-symbols NAME` | Debug |
 | `engram search-code "…"` | Debug |
 | `engram status` | DB path, schema, file/symbol/commit counts, `git_head`, last index, stale sample |
-| `engram doctor` | Binary, grammars, DB, ignore rules, harness config |
+| `engram doctor` | Binary, grammars, DB, ignore rules, harness config, Grok/Copilot/Claude reindex hooks |
 | `engram mcp` | Stdio MCP server |
 
 Exit codes: `0` ok, `1` usage, `2` not initialized, `3` index/IO error.

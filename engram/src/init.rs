@@ -19,6 +19,41 @@ command = \"engram\"
 args = [\"mcp\"]
 ";
 
+const GROK_REINDEX_HOOK: &str = r#"{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|write|search_replace",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"${GROK_WORKSPACE_ROOT:-${CLAUDE_PROJECT_DIR:-.}}\" && engram index >/dev/null 2>&1; exit 0",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+const COPILOT_REINDEX_HOOK: &str = r#"{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "type": "command",
+        "matcher": "create|edit",
+        "bash": "engram index >/dev/null 2>&1; exit 0",
+        "powershell": "engram index | Out-Null; exit 0",
+        "cwd": ".",
+        "timeoutSec": 60
+      }
+    ]
+  }
+}
+"#;
+
 const SKILL_MD: &str = "\
 ---
 name: engram
@@ -108,11 +143,19 @@ pub fn run_init(cwd: &Path) -> Result<PathBuf, Error> {
     Ok(cwd.to_path_buf())
 }
 
-/// Write project-scoped MCP harness snippets. `id`: grok|copilot|claude|cursor|all.
+/// Write project-scoped MCP harness snippets (and Grok/Copilot/Claude reindex hooks).
+/// `id`: grok|copilot|claude|cursor|all.
 pub fn write_harness(root: &Path, id: &str) -> Result<(), Error> {
     match id {
         "grok" => write_grok_toml(root),
-        "copilot" | "claude" => merge_mcp_json(&root.join(".mcp.json")),
+        "copilot" => {
+            merge_mcp_json(&root.join(".mcp.json"))?;
+            write_copilot_reindex_hook(root)
+        }
+        "claude" => {
+            merge_mcp_json(&root.join(".mcp.json"))?;
+            write_claude_reindex_hook(root)
+        }
         "cursor" => {
             let path = root.join(".cursor/mcp.json");
             if let Some(parent) = path.parent() {
@@ -123,6 +166,8 @@ pub fn write_harness(root: &Path, id: &str) -> Result<(), Error> {
         "all" => {
             write_grok_toml(root)?;
             merge_mcp_json(&root.join(".mcp.json"))?;
+            write_copilot_reindex_hook(root)?;
+            write_claude_reindex_hook(root)?;
             let cursor = root.join(".cursor/mcp.json");
             if let Some(parent) = cursor.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -170,7 +215,7 @@ fn write_grok_toml(root: &Path) -> Result<(), Error> {
     if path.is_file() {
         let mut contents = std::fs::read_to_string(&path)?;
         if contents.contains("[mcp_servers.engram]") {
-            return Ok(());
+            return write_grok_reindex_hook(root);
         }
         if !contents.is_empty() && !contents.ends_with('\n') {
             contents.push('\n');
@@ -180,6 +225,105 @@ fn write_grok_toml(root: &Path) -> Result<(), Error> {
     } else {
         std::fs::write(&path, GROK_MCP_TOML)?;
     }
+    write_grok_reindex_hook(root)
+}
+
+/// Project-scoped Grok PostToolUse hook. Write-if-missing; never overwrite.
+fn write_grok_reindex_hook(root: &Path) -> Result<(), Error> {
+    let path = root.join(".grok/hooks/engram-index.json");
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, GROK_REINDEX_HOOK)?;
+    Ok(())
+}
+
+/// Project-scoped Copilot postToolUse hook. Write-if-missing; never overwrite.
+fn write_copilot_reindex_hook(root: &Path) -> Result<(), Error> {
+    let path = root.join(".github/hooks/engram-index.json");
+    if path.is_file() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, COPILOT_REINDEX_HOOK)?;
+    Ok(())
+}
+
+fn claude_reindex_hook_group() -> Value {
+    json!({
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [{
+            "type": "command",
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-.}\" && engram index >/dev/null 2>&1; exit 0",
+            "timeout": 60
+        }]
+    })
+}
+
+fn claude_hook_already_present(hooks: &Value) -> bool {
+    let Some(groups) = hooks.pointer("/PostToolUse").and_then(Value::as_array) else {
+        return false;
+    };
+    groups.iter().any(|group| {
+        group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|h| {
+                h.get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| c.contains("engram index"))
+            })
+    })
+}
+
+/// Merge a PostToolUse reindex group into `.claude/settings.json`.
+/// Creates the file if missing; never overwrites unparseable JSON or duplicates the hook.
+fn write_claude_reindex_hook(root: &Path) -> Result<(), Error> {
+    let path = root.join(".claude/settings.json");
+    let mut root_obj: Map<String, Value> = if path.is_file() {
+        let text = std::fs::read_to_string(&path)?;
+        match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(m)) => m,
+            Ok(_) | Err(_) => return Ok(()),
+        }
+    } else {
+        Map::new()
+    };
+
+    let hooks = root_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
+    if claude_hook_already_present(hooks) {
+        return Ok(());
+    }
+    let post = hooks
+        .as_object_mut()
+        .expect("hooks object")
+        .entry("PostToolUse".to_string())
+        .or_insert_with(|| json!([]));
+    if !post.is_array() {
+        *post = json!([]);
+    }
+    post.as_array_mut()
+        .expect("PostToolUse array")
+        .push(claude_reindex_hook_group());
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let pretty = serde_json::to_string_pretty(&Value::Object(root_obj))
+        .map_err(|e| Error::Usage(e.to_string()))?;
+    std::fs::write(&path, pretty + "\n")?;
     Ok(())
 }
 
@@ -282,6 +426,36 @@ mod tests {
         assert!(gi.contains(".engram/"));
     }
 
+    fn grok_hook_path(root: &std::path::Path) -> PathBuf {
+        root.join(".grok/hooks/engram-index.json")
+    }
+
+    fn assert_reindex_hook(json: &str) {
+        let v: serde_json::Value = serde_json::from_str(json).expect("hook json");
+        let group = &v["hooks"]["PostToolUse"][0];
+        assert_eq!(
+            group["matcher"].as_str().unwrap(),
+            "Write|Edit|MultiEdit|write|search_replace"
+        );
+        let hook = &group["hooks"][0];
+        assert_eq!(hook["type"].as_str().unwrap(), "command");
+        let cmd = hook["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("engram index"),
+            "command must run engram index, got {cmd}"
+        );
+        assert!(
+            cmd.contains("GROK_WORKSPACE_ROOT"),
+            "command must cd to GROK_WORKSPACE_ROOT, got {cmd}"
+        );
+        assert!(
+            cmd.contains("CLAUDE_PROJECT_DIR"),
+            "command must fall back to CLAUDE_PROJECT_DIR, got {cmd}"
+        );
+        assert!(cmd.contains("exit 0"), "command must fail-open, got {cmd}");
+        assert_eq!(hook["timeout"].as_u64().unwrap(), 60);
+    }
+
     #[test]
     fn harness_grok_writes_toml() {
         let root = tempfile_dir();
@@ -291,6 +465,230 @@ mod tests {
         assert!(t.contains("[mcp_servers.engram]"));
         assert!(t.contains("command = \"engram\""));
         assert!(t.contains("mcp"));
+    }
+
+    #[test]
+    fn harness_grok_writes_reindex_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "grok").unwrap();
+        let json = std::fs::read_to_string(grok_hook_path(&root)).unwrap();
+        assert_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_all_writes_reindex_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "all").unwrap();
+        let json = std::fs::read_to_string(grok_hook_path(&root)).unwrap();
+        assert_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_grok_writes_hook_when_toml_already_has_mcp() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        std::fs::create_dir_all(root.join(".grok")).unwrap();
+        std::fs::write(root.join(".grok/config.toml"), super::GROK_MCP_TOML).unwrap();
+        crate::init::write_harness(&root, "grok").unwrap();
+        let json = std::fs::read_to_string(grok_hook_path(&root)).unwrap();
+        assert_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_grok_does_not_overwrite_existing_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        let path = grok_hook_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"keep\":true}\n").unwrap();
+        crate::init::write_harness(&root, "grok").unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(json, "{\"keep\":true}\n");
+    }
+
+    #[test]
+    fn harness_copilot_does_not_write_grok_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "copilot").unwrap();
+        assert!(!grok_hook_path(&root).exists());
+    }
+
+    fn copilot_hook_path(root: &std::path::Path) -> PathBuf {
+        root.join(".github/hooks/engram-index.json")
+    }
+
+    fn assert_copilot_reindex_hook(json: &str) {
+        let v: serde_json::Value = serde_json::from_str(json).expect("copilot hook json");
+        assert_eq!(v["version"].as_u64().unwrap(), 1);
+        let hook = &v["hooks"]["postToolUse"][0];
+        assert_eq!(hook["type"].as_str().unwrap(), "command");
+        assert_eq!(hook["matcher"].as_str().unwrap(), "create|edit");
+        let bash = hook["bash"].as_str().unwrap();
+        assert!(
+            bash.contains("engram index"),
+            "bash must run engram index, got {bash}"
+        );
+        assert!(bash.contains("exit 0"), "bash must fail-open, got {bash}");
+        let ps = hook["powershell"].as_str().unwrap();
+        assert!(
+            ps.contains("engram index"),
+            "powershell must run engram index, got {ps}"
+        );
+        assert_eq!(hook["cwd"].as_str().unwrap(), ".");
+        assert_eq!(hook["timeoutSec"].as_u64().unwrap(), 60);
+    }
+
+    #[test]
+    fn harness_copilot_writes_reindex_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "copilot").unwrap();
+        let json = std::fs::read_to_string(copilot_hook_path(&root)).unwrap();
+        assert_copilot_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_all_writes_copilot_reindex_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "all").unwrap();
+        let json = std::fs::read_to_string(copilot_hook_path(&root)).unwrap();
+        assert_copilot_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_copilot_does_not_overwrite_existing_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        let path = copilot_hook_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"keep\":true}\n").unwrap();
+        crate::init::write_harness(&root, "copilot").unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(json, "{\"keep\":true}\n");
+    }
+
+    #[test]
+    fn harness_claude_does_not_write_copilot_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "claude").unwrap();
+        assert!(!copilot_hook_path(&root).exists());
+    }
+
+    fn claude_settings_path(root: &std::path::Path) -> PathBuf {
+        root.join(".claude/settings.json")
+    }
+
+    fn assert_claude_reindex_hook(json: &str) {
+        let v: serde_json::Value = serde_json::from_str(json).expect("claude settings json");
+        let group = &v["hooks"]["PostToolUse"][0];
+        assert_eq!(
+            group["matcher"].as_str().unwrap(),
+            "Write|Edit|MultiEdit"
+        );
+        let hook = &group["hooks"][0];
+        assert_eq!(hook["type"].as_str().unwrap(), "command");
+        let cmd = hook["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("engram index"),
+            "command must run engram index, got {cmd}"
+        );
+        assert!(
+            cmd.contains("CLAUDE_PROJECT_DIR"),
+            "command must cd to CLAUDE_PROJECT_DIR, got {cmd}"
+        );
+        assert!(cmd.contains("exit 0"), "command must fail-open, got {cmd}");
+        assert_eq!(hook["timeout"].as_u64().unwrap(), 60);
+    }
+
+    fn post_tool_use_len(json: &str) -> usize {
+        serde_json::from_str::<serde_json::Value>(json)
+            .unwrap()["hooks"]["PostToolUse"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn harness_claude_writes_reindex_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "claude").unwrap();
+        let json = std::fs::read_to_string(claude_settings_path(&root)).unwrap();
+        assert_claude_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_all_writes_claude_reindex_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "all").unwrap();
+        let json = std::fs::read_to_string(claude_settings_path(&root)).unwrap();
+        assert_claude_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_claude_merges_into_existing_settings() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        let path = claude_settings_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"permissions\":{\"allow\":[\"Bash\"]}}\n").unwrap();
+        crate::init::write_harness(&root, "claude").unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert_claude_reindex_hook(&json);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["permissions"]["allow"][0], "Bash");
+    }
+
+    #[test]
+    fn harness_claude_does_not_duplicate_existing_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "claude").unwrap();
+        crate::init::write_harness(&root, "claude").unwrap();
+        let json = std::fs::read_to_string(claude_settings_path(&root)).unwrap();
+        assert_eq!(post_tool_use_len(&json), 1);
+        assert_claude_reindex_hook(&json);
+    }
+
+    #[test]
+    fn harness_claude_leaves_unparseable_settings() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        let path = claude_settings_path(&root);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json\n").unwrap();
+        crate::init::write_harness(&root, "claude").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json\n");
+    }
+
+    #[test]
+    fn harness_copilot_does_not_write_claude_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "copilot").unwrap();
+        assert!(!claude_settings_path(&root).exists());
+    }
+
+    #[test]
+    fn harness_grok_does_not_write_claude_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "grok").unwrap();
+        assert!(!claude_settings_path(&root).exists());
+    }
+
+    #[test]
+    fn harness_grok_does_not_write_copilot_hook() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_harness(&root, "grok").unwrap();
+        assert!(!copilot_hook_path(&root).exists());
     }
 
     #[test]

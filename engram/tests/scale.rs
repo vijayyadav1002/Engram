@@ -104,3 +104,72 @@ fn doctor_missing_harness_warns_exit_zero() {
         "expected harness-missing warn on stderr, got {stderr:?}"
     );
 }
+
+#[test]
+fn doctor_reports_hook_grok_absent() {
+    let root = tempfile_dir();
+    engram::init::run_init(&root).unwrap();
+    let out = engram::doctor::run_doctor(&root).unwrap();
+    assert!(
+        out.contains("hook grok: absent"),
+        "expected hook grok: absent, got {out}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_grok_present() {
+    let root = tempfile_dir();
+    engram::init::run_init(&root).unwrap();
+    engram::init::write_harness(&root, "grok").unwrap();
+    let out = engram::doctor::run_doctor(&root).unwrap();
+    assert!(
+        out.contains("hook grok: present"),
+        "expected hook grok: present, got {out}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_copilot_absent() {
+    let root = tempfile_dir();
+    engram::init::run_init(&root).unwrap();
+    let out = engram::doctor::run_doctor(&root).unwrap();
+    assert!(
+        out.contains("hook copilot: absent"),
+        "expected hook copilot: absent, got {out}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_copilot_present() {
+    let root = tempfile_dir();
+    engram::init::run_init(&root).unwrap();
+    engram::init::write_harness(&root, "copilot").unwrap();
+    let out = engram::doctor::run_doctor(&root).unwrap();
+    assert!(
+        out.contains("hook copilot: present"),
+        "expected hook copilot: present, got {out}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_claude_absent() {
+    let root = tempfile_dir();
+    engram::init::run_init(&root).unwrap();
+    let out = engram::doctor::run_doctor(&root).unwrap();
+    assert!(
+        out.contains("hook claude: absent"),
+        "expected hook claude: absent, got {out}"
+    );
+}
+
+#[test]
+fn doctor_reports_hook_claude_present() {
+    let root = tempfile_dir();
+    engram::init::run_init(&root).unwrap();
+    engram::init::write_harness(&root, "claude").unwrap();
+    let out = engram::doctor::run_doctor(&root).unwrap();
+    assert!(
+        out.contains("hook claude: present"),
+        "expected hook claude: present, got {out}"
+    );
+}
