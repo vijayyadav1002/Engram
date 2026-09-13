@@ -72,7 +72,7 @@ fn initialize_result() -> Value {
     json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "engram", "version": "0.1.0" }
+        "serverInfo": { "name": "engram", "version": "0.2.0" }
     })
 }
 
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["result"]["protocolVersion"], "2024-11-05");
         assert_eq!(v["result"]["serverInfo"]["name"], "engram");
-        assert_eq!(v["result"]["serverInfo"]["version"], "0.1.0");
+        assert_eq!(v["result"]["serverInfo"]["version"], "0.2.0");
     }
 
     #[test]
