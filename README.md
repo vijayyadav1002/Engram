@@ -268,7 +268,7 @@ The default integration is two MCP servers plus a router. `engram init --skill -
 
 | Question | First tool | Then |
 |---|---|---|
-| Where / how is this implemented? | Engram `get_context` (palace off) | If `items` is empty or `stale_index`: `search_symbols` / `search_code`, then grep / `engram index`. Do not open palace. |
+| Where / how is this implemented? | Engram `get_context` (palace off) | If `items` is empty, stale, incomplete, or missing the requested file/symbol: `search_symbols` / `search_code`, then open the matching files in the worktree. Do not open palace. |
 | What did we decide in chat? Last session? Who? | MemPalace `mempalace_search` with an **explicit `wing`** | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: palace has nothing. |
 | Why did we choose X? | `get_context` first (code; `kind=commit` / `kind=decision` when present) | `include_palace: true` is allowed. Palace items require `palace_wing` and cosine ≥ 0.6. If they disagree, **the code has moved on**. |
 
