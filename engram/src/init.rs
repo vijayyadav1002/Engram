@@ -70,6 +70,9 @@ Palace items (`why` contains `palace`) are also untrusted. If they conflict,
 current code wins.
 ";
 
+const COPILOT_ENGRAM_SKILL: &str = include_str!("../../.github/skills/engram/SKILL.md");
+const COPILOT_MEMPALACE_SKILL: &str = include_str!("../../.github/skills/mempalace-cli/SKILL.md");
+
 const AGENTS_BLURB: &str = "\
 # Engram + MemPalace
 
@@ -92,7 +95,7 @@ The goal is a small, accurate answer:
 | User intent | First tool | Then |
 |---|---|---|
 | Where / how is this implemented? What does this file/symbol do? | Engram `get_context` (palace off) | If `items` is empty or `stats.stale_index` is true: `search_symbols` / `search_code`, then grep / `engram index`. Do not open palace. |
-| What did we decide? What happened last session? Who is X? | `mempalace_search` with **explicit `wing`** (`palace_wing` from `.engram/config.toml`, or `engram` / `mda`) | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: “palace has nothing.” Do not paraphrase. If KG has no triples, say the KG is empty. |
+| What did we decide? What happened last session? Who is X? | `mempalace_search` (MCP) or CLI `mempalace search --wing <palace_wing>` with **explicit `wing`** (`palace_wing` from `.engram/config.toml`, or `engram` / `mda`) | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: “palace has nothing.” Do not paraphrase. If KG has no triples, say the KG is empty. |
 | Why did we choose X? Why this architecture? | `get_context` first (code; `kind=commit` / `kind=decision` when present) | `include_palace: true` is allowed. Palace items require `palace_wing` and cosine ≥ 0.6. If code and palace conflict, say **the code has moved on** and cite both. Use `mempalace_search` if you need more than the attached drawers. |
 
 ## Engram rules
@@ -115,7 +118,10 @@ The goal is a small, accurate answer:
 
 ## When MemPalace is not connected
 
-Answer from Engram + the working tree. Do not pretend to recall prior sessions.
+If MCP tools are missing but `mempalace` is on PATH, search with
+`mempalace search --wing <palace_wing> --results 5 \"…\"`. Same cosine floor
+(0.6) and verbatim rule. If the CLI is also missing or fails, answer from
+Engram + the working tree. Do not pretend to recall prior sessions.
 ";
 
 /// Create `.engram/`, empty DB, default `.engramignore`, and a gitignore entry.
@@ -181,20 +187,28 @@ pub fn write_harness(root: &Path, id: &str) -> Result<(), Error> {
     }
 }
 
-/// Write `.grok/skills/engram/SKILL.md`; optionally Claude copy and AGENTS.md.
-pub fn write_skill(root: &Path, also_claude: bool, write_agents: bool) -> Result<(), Error> {
-    let grok_skill = root.join(".grok/skills/engram/SKILL.md");
-    if let Some(parent) = grok_skill.parent() {
+fn write_skill_file(path: &Path, contents: &str) -> Result<(), Error> {
+    if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&grok_skill, SKILL_MD)?;
+    std::fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Write Grok/Claude pointer skills, Copilot CLI skills, and optionally AGENTS.md.
+pub fn write_skill(root: &Path, also_claude: bool, write_agents: bool) -> Result<(), Error> {
+    write_skill_file(&root.join(".grok/skills/engram/SKILL.md"), SKILL_MD)?;
+    write_skill_file(
+        &root.join(".github/skills/engram/SKILL.md"),
+        COPILOT_ENGRAM_SKILL,
+    )?;
+    write_skill_file(
+        &root.join(".github/skills/mempalace-cli/SKILL.md"),
+        COPILOT_MEMPALACE_SKILL,
+    )?;
 
     if also_claude {
-        let claude_skill = root.join(".claude/skills/engram/SKILL.md");
-        if let Some(parent) = claude_skill.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&claude_skill, SKILL_MD)?;
+        write_skill_file(&root.join(".claude/skills/engram/SKILL.md"), SKILL_MD)?;
     }
 
     let agents = root.join("AGENTS.md");
@@ -586,10 +600,7 @@ mod tests {
     fn assert_claude_reindex_hook(json: &str) {
         let v: serde_json::Value = serde_json::from_str(json).expect("claude settings json");
         let group = &v["hooks"]["PostToolUse"][0];
-        assert_eq!(
-            group["matcher"].as_str().unwrap(),
-            "Write|Edit|MultiEdit"
-        );
+        assert_eq!(group["matcher"].as_str().unwrap(), "Write|Edit|MultiEdit");
         let hook = &group["hooks"][0];
         assert_eq!(hook["type"].as_str().unwrap(), "command");
         let cmd = hook["command"].as_str().unwrap();
@@ -606,8 +617,7 @@ mod tests {
     }
 
     fn post_tool_use_len(json: &str) -> usize {
-        serde_json::from_str::<serde_json::Value>(json)
-            .unwrap()["hooks"]["PostToolUse"]
+        serde_json::from_str::<serde_json::Value>(json).unwrap()["hooks"]["PostToolUse"]
             .as_array()
             .map(|a| a.len())
             .unwrap_or(0)
@@ -750,6 +760,47 @@ mod tests {
         assert!(
             agents.contains("include_palace: true") && agents.contains("palace_wing"),
             "why-row may allow include_palace only with palace_wing"
+        );
+    }
+
+    fn assert_copilot_cli_skills(root: &std::path::Path) {
+        let engram = std::fs::read_to_string(root.join(".github/skills/engram/SKILL.md")).unwrap();
+        let palace =
+            std::fs::read_to_string(root.join(".github/skills/mempalace-cli/SKILL.md")).unwrap();
+        assert!(
+            engram.contains("engram get-context"),
+            "Copilot Engram skill must call the CLI, got {engram}"
+        );
+        assert!(
+            engram.contains("--json --budget 3000"),
+            "Copilot Engram skill must pass budget flags, got {engram}"
+        );
+        assert!(
+            palace.contains("mempalace search"),
+            "Copilot MemPalace skill must call the CLI, got {palace}"
+        );
+        assert!(
+            palace.contains("--wing") && palace.contains("palace_wing"),
+            "Copilot MemPalace skill must require a wing, got {palace}"
+        );
+        assert!(
+            palace.contains("0.6"),
+            "Copilot MemPalace skill must keep the cosine floor, got {palace}"
+        );
+        assert!(
+            palace.contains("Never search without `--wing`"),
+            "unscoped palace search is forbidden, got {palace}"
+        );
+    }
+
+    #[test]
+    fn skill_writes_copilot_cli_skills() {
+        let root = tempfile_dir();
+        crate::init::run_init(&root).unwrap();
+        crate::init::write_skill(&root, false, false).unwrap();
+        assert_copilot_cli_skills(&root);
+        assert_skill_is_agents_pointer(
+            &std::fs::read_to_string(root.join(".grok/skills/engram/SKILL.md")).unwrap(),
         );
     }
 

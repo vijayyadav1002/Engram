@@ -160,7 +160,7 @@ engram init --harness cursor --skill
 engram init --harness all --skill --write-agents
 ```
 
-`--skill` writes a short “call `get_context` first” skill. `--write-agents` creates `AGENTS.md` if it is missing; if `AGENTS.md` already exists, the blurb is appended even without that flag.
+`--skill` writes a short “call `get_context` first” skill (Grok/Claude MCP pointer, plus Copilot CLI skills under `.github/skills/` for `engram get-context` and `mempalace search` when MCP is blocked). `--write-agents` creates `AGENTS.md` if it is missing; if `AGENTS.md` already exists, the blurb is appended even without that flag.
 
 `init` is safe to re-run. It will not wipe an existing index.
 

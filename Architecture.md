@@ -284,7 +284,7 @@ Harness wiring (`engram init --harness`):
 | `cursor` | `.cursor/mcp.json` |
 | `all` | merge into all of the above (Grok, Copilot, and Claude hooks included) |
 
-Same argv everywhere: `engram` `["mcp"]`. `--skill` writes `.grok/skills/engram/SKILL.md`. `AGENTS.md` is created only with `--write-agents`; if it already exists the blurb is appended.
+Same argv everywhere: `engram` `["mcp"]`. `--skill` writes `.grok/skills/engram/SKILL.md` and Copilot CLI skills under `.github/skills/` (`engram`, `mempalace-cli`). `AGENTS.md` is created only with `--write-agents`; if it already exists the blurb is appended.
 
 ## 10. Optional MemPalace bridge
 

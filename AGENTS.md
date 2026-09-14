@@ -38,7 +38,7 @@ The goal is a small, accurate answer:
 | User intent | First tool | Then |
 |---|---|---|
 | Where / how is this implemented? What does this file/symbol do? | Engram MCP `get_context` (palace off), or CLI `engram get-context "…" --json --budget 3000` | If `items` is empty, stale, incomplete, or does not contain the requested file, symbol, or command: MCP `search_symbols` / `search_code`, or CLI `engram search-symbols` / `engram search-code`, then search the active worktree directly as needed. Do not open palace. |
-| What did we decide? What happened last session? Who is X? | `mempalace_search` with **explicit `wing`** (`palace_wing` from `.engram/config.toml`, or `engram` / `mda`) | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: “palace has nothing.” Do not paraphrase. If KG has no triples, say the KG is empty. |
+| What did we decide? What happened last session? Who is X? | `mempalace_search` (MCP) or CLI `mempalace search --wing <palace_wing>` (`palace_wing` from `.engram/config.toml`, or `engram` / `mda`) | Quote **verbatim** only if cosine similarity ≥ 0.6. Below that, or empty: “palace has nothing.” Do not paraphrase. If KG has no triples, say the KG is empty. |
 | Why did we choose X? Why this architecture? | Engram first (code; `kind=commit` / `kind=decision` when present) | MCP `include_palace: true` or CLI `--palace` is allowed. Palace items require `palace_wing` and cosine ≥ 0.6. If code and palace conflict, say **the code has moved on** and cite both. Use `mempalace_search` if you need more than the attached drawers. |
 
 ## Engram rules
@@ -73,4 +73,8 @@ takes precedence over a stale index or palace content.
 
 ## When MemPalace is not connected
 
-Answer from Engram + the working tree. Do not pretend to recall prior sessions.
+If MCP tools are missing but `mempalace` is on PATH, search with
+`mempalace search --wing <palace_wing> --results 5 "…"`. Same cosine floor
+(0.6) and verbatim rule. If the CLI is also missing or fails, answer from
+Engram + the working tree. Do not pretend to recall prior sessions. Copilot
+loads the CLI skills under `.github/skills/` (`engram init --skill`).
