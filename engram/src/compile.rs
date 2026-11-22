@@ -98,8 +98,18 @@ pub fn get_context_with(
 ) -> Result<ContextPackage, Error> {
     let store = Store::open_read(&root.join(".engram/index.sqlite"))?;
     let plan = plan_query(query);
+    let aliases = alias_probes(&plan);
 
-    let tagged = collect_symbols_tagged(&store, &plan.symbol_terms, CAP_SYMBOLS)?;
+    let mut tagged = collect_symbols_tagged(&store, &plan.symbol_terms, CAP_SYMBOLS)?;
+    let mut seen_ids: HashSet<i64> = tagged.iter().map(|(hit, _)| hit.id).collect();
+    if tagged.len() < CAP_SYMBOLS && !aliases.is_empty() {
+        let remain = CAP_SYMBOLS - tagged.len();
+        for (hit, _) in collect_symbols_tagged(&store, &aliases, remain)? {
+            if seen_ids.insert(hit.id) {
+                tagged.push((hit, false));
+            }
+        }
+    }
     let symbol_hits: Vec<SymbolHit> = tagged.iter().map(|(h, _)| h.clone()).collect();
     let mut by_id: HashMap<i64, SymbolHit> = HashMap::new();
     for h in &symbol_hits {
@@ -107,18 +117,22 @@ pub fn get_context_with(
     }
     let accepted_ids: HashSet<i64> = by_id.keys().copied().collect();
 
-    let fts_hits = collect_fts(&store, &plan)?;
+    let fts_hits = collect_fts(&store, &plan, &[])?;
     let (neighbor_cands, mut neighbor_edges) = collect_neighbors(&store, &symbol_hits, &mut by_id)?;
 
     let mut terms_for_heading = plan.symbol_terms.clone();
     for w in plan.fts_query.split_whitespace() {
         push_unique(&mut terms_for_heading, w.to_string());
     }
+    for alias in &aliases {
+        push_unique(&mut terms_for_heading, alias.clone());
+    }
 
     let mut spans: Vec<SpanCand> = Vec::new();
     for (h, exact) in &tagged {
         spans.push(span_from_symbol(h, why_for_symbol(h, *exact)));
     }
+    tag_alias_spans(&mut spans, &aliases);
     for (h, n) in &neighbor_cands {
         let mut why = BTreeSet::new();
         why.insert(neighbor_why(n.kind).to_string());
@@ -138,6 +152,9 @@ pub fn get_context_with(
     let mut fts_terms = plan.symbol_terms.clone();
     for w in plan.fts_query.split_whitespace() {
         push_unique(&mut fts_terms, w.to_string());
+    }
+    for alias in &aliases {
+        push_unique(&mut fts_terms, alias.clone());
     }
 
     for (idx, hit) in fts_hits.iter().enumerate() {
@@ -550,7 +567,81 @@ fn push_unique(out: &mut Vec<String>, item: String) {
     }
 }
 
-fn collect_fts(store: &Store, plan: &QueryPlan) -> Result<Vec<FtsHit>, Error> {
+/// Extra lookups when the question uses a word the code usually does not.
+/// The original plan stays intact; these are additional probes only.
+fn alias_probes(plan: &QueryPlan) -> Vec<String> {
+    const TABLE: &[(&str, &[&str])] = &[
+        (
+            "authentication",
+            &["auth", "session", "token", "verify", "login", "credential"],
+        ),
+        (
+            "authenticate",
+            &["auth", "session", "token", "verify", "login"],
+        ),
+        (
+            "authenticated",
+            &["auth", "session", "token", "verify", "login"],
+        ),
+        ("auth", &["session", "token", "verify", "login"]),
+        ("login", &["auth", "session", "signin"]),
+        ("signin", &["auth", "session", "login"]),
+        ("websocket", &["socket"]),
+        ("websockets", &["socket", "websocket"]),
+    ];
+    let mut seeds = Vec::new();
+    for term in &plan.symbol_terms {
+        push_unique(&mut seeds, term.to_ascii_lowercase());
+    }
+    for word in plan.fts_query.split_whitespace() {
+        push_unique(&mut seeds, word.to_ascii_lowercase());
+    }
+    let mut out = Vec::new();
+    for seed in &seeds {
+        for (key, vals) in TABLE {
+            if seed == key {
+                for val in *vals {
+                    push_unique(&mut out, (*val).to_string());
+                }
+            }
+        }
+    }
+    out.retain(|probe| {
+        !plan
+            .symbol_terms
+            .iter()
+            .any(|term| term.eq_ignore_ascii_case(probe))
+            && !plan
+                .fts_query
+                .split_whitespace()
+                .any(|word| word.eq_ignore_ascii_case(probe))
+    });
+    out
+}
+
+fn tag_alias_spans(spans: &mut [SpanCand], aliases: &[String]) {
+    if aliases.is_empty() {
+        return;
+    }
+    for span in spans {
+        if span.why.contains("exact_symbol") {
+            continue;
+        }
+        let Some(name) = span.symbol.as_deref() else {
+            continue;
+        };
+        let folded = name.to_ascii_lowercase();
+        if aliases.iter().any(|alias| {
+            let alias = alias.to_ascii_lowercase();
+            !alias.is_empty()
+                && (folded == alias || folded.starts_with(&alias) || folded.contains(&alias))
+        }) {
+            span.why.insert("alias".into());
+        }
+    }
+}
+
+fn collect_fts(store: &Store, plan: &QueryPlan, aliases: &[String]) -> Result<Vec<FtsHit>, Error> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     if !plan.fts_query.is_empty() {
@@ -563,7 +654,7 @@ fn collect_fts(store: &Store, plan: &QueryPlan) -> Result<Vec<FtsHit>, Error> {
             }
         }
     }
-    for term in &plan.symbol_terms {
+    for term in plan.symbol_terms.iter().chain(aliases.iter()) {
         if out.len() >= CAP_FTS {
             break;
         }
@@ -1000,6 +1091,9 @@ fn rescore(span: &mut SpanCand, path_hints: &[String], top_files: &HashSet<Strin
     }
     if span.why.contains("prefix_symbol") {
         score += 3.0;
+    }
+    if span.why.contains("alias") {
+        score += 2.0;
     }
     if span.why.contains("path_basename") {
         score += 3.0;

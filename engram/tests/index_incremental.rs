@@ -162,6 +162,33 @@ fn reindex_session_keeps_banner_edge() {
 }
 
 #[test]
+fn common_method_is_not_linked_across_files() {
+    let root = setup();
+    fs::write(
+        root.join("src/auth/desk.ts"),
+        "export function push(x: string) { return x }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/auth/quote.ts"),
+        "export function quoteNight() { const reasons: string[] = []; reasons.push(\"weekend\"); return 1 }\n",
+    )
+    .unwrap();
+    index_repo(&root, false).unwrap();
+    let db = Store::open_read(&root.join(".engram/index.sqlite")).unwrap();
+    let linked = db
+        .lookup_symbols_exact("quoteNight", 10)
+        .unwrap()
+        .into_iter()
+        .flat_map(|h| db.neighbors(h.id, 40).unwrap())
+        .any(|n| n.kind == EdgeKind::Call && n.dst_name == "push");
+    assert!(
+        !linked,
+        "reasons.push must not bind to a function named push in another file"
+    );
+}
+
+#[test]
 fn name_only_call_is_low() {
     let root = setup();
     fs::write(
