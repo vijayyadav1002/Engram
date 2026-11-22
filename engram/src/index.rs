@@ -577,6 +577,17 @@ impl ImportIndex {
     }
 }
 
+/// Method names that are too common to bind to the first symbol of that name.
+fn is_ubiquitous_callee(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "push", "pop", "shift", "unshift", "map", "filter", "forEach", "reduce", "find", "some",
+        "every", "get", "set", "has", "add", "delete", "then", "catch", "finally", "send", "close",
+        "keys", "values", "entries", "slice", "splice", "join", "split", "trim", "log", "stringify",
+        "parse", "concat", "includes",
+    ];
+    NAMES.iter().any(|n| name.eq_ignore_ascii_case(n))
+}
+
 fn resolve_edge(
     edge: &ExtractedEdge,
     file_path: &str,
@@ -603,6 +614,10 @@ fn resolve_edge(
                 resolve_call_via_imports(file_path, &edge.dst_name, import_dsts, store, imports)?
             {
                 return Ok(Some((src, dst, EdgeKind::Call, Confidence::High)));
+            }
+            // `items.push` is not a call to the first function named push in the repo.
+            if is_ubiquitous_callee(&edge.dst_name) {
+                return Ok(None);
             }
             let hits = store.lookup_symbols_exact(&edge.dst_name, 8)?;
             let Some(hit) = hits.into_iter().next() else {
